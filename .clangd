@@ -1,0 +1,29 @@
+CompileFlags:
+  CompilationDatabase: .
+
+  # Xóa các flag xtensa-specific không hợp lệ với clangd/clang
+  Remove:
+    - -mlongcalls
+    - -mfix-esp32-psram-cache-issue
+    - -mfix-esp32-psram-cache-strategy*
+    - --param=min-pagesize=0
+    - -fno-tree-switch-conversion
+    - -fno-jump-tables
+    - -mtext-section-literals
+    - -mforce-l32
+    - -fstrict-volatile-bitfields
+    - -mfix-esp32-psram-cache-issue
+    - -fno-rtti
+
+  Add:
+    - -Wno-unknown-pragmas
+    - -Wno-unknown-attributes
+    - -ferror-limit=0
+
+Diagnostics:
+  UnusedIncludes: None
+  Suppress:
+    - pp_including_mainfile_in_preamble
+
+Index:
+  Background: Build

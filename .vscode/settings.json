@@ -1,0 +1,13 @@
+{
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}",
+        "--query-driver=/home/huudinh/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-*,/home/huudinh/.platformio/packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-*,/home/huudinh/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-*",
+        "--background-index",
+        "--clang-tidy=false",
+        "--log=error"
+    ],
+    "clangd.checkUpdates": false,
+    "[cpp]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+    }
+}

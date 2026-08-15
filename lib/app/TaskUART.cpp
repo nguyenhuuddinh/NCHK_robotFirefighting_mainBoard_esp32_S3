@@ -25,8 +25,10 @@ void Task_UART(void* pvParam) {
         SensorPacket_t packet;
         while (slaveComm.tryReceive(packet)) {
             // Luu packet moi nhat vao context (cho Logger va micro-ROS doc)
+            xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
             ctx->lastSensorData = packet;
             ctx->sensorDataValid = true;
+            xSemaphoreGive(ctx->stateMutex);
         }
 
         // ========================================================

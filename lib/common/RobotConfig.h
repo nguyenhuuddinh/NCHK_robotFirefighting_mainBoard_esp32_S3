@@ -82,19 +82,23 @@
 #define CORE_1 1
 
 #define TASK_MOTION_PERIOD_MS   20   // 50Hz  (Core 1)
-#define TASK_MICROROS_PERIOD_MS 20   // 50Hz  (Core 0)
+#define TASK_MICROROS_PERIOD_MS 20   // 50Hz  (Core 0) — legacy, giữ để TaskMicroROS compile
+#define TASK_SERIALCOMM_PERIOD_MS 20 // 50Hz  (Core 0) — raw serial V2
 #define TASK_UART_PERIOD_MS     50   // 20Hz  (Core 0)
 #define TASK_LOGGER_PERIOD_MS   200  // 5Hz   (Core 0)
 
 #define TASK_MOTION_PRIORITY    5    // Cao nhat
-#define TASK_MICROROS_PRIORITY  3
+#define TASK_MICROROS_PRIORITY  3    // legacy
+#define TASK_SERIALCOMM_PRIORITY 3   // raw serial V2, cùng priority với micro-ROS
 #define TASK_UART_PRIORITY      2
 #define TASK_LOGGER_PRIORITY    1    // Thap nhat
 
 #define TASK_MOTION_STACK    4096
-#define TASK_MICROROS_STACK  8192    // micro-ROS can nhieu stack
+#define TASK_MICROROS_STACK  8192    // micro-ROS can nhieu stack — legacy
+#define TASK_SERIALCOMM_STACK 4096  // raw serial V2 (không cần 8K như micro-ROS)
 #define TASK_UART_STACK      3072
 #define TASK_LOGGER_STACK    3072
+
 
 // ==========================================
 // VELOCITY RAMP (Tang/Giam toc mem)
@@ -119,14 +123,14 @@
 #define CMD_VEL_TIMEOUT_MS 1000  // Mat lenh > 1s -> EMERGENCY
 
 // ==========================================
-// DEBUG SERIAL — Tach rieng debug log va micro-ROS transport
+// DEBUG SERIAL — Tach rieng debug log va serial transport
 // ==========================================
-// Serial  (USB CDC) → micro-ROS transport (noi voi Raspberry Pi)
+// Serial  (USB CDC) → Raw Serial V2 transport (noi voi Raspberry Pi)
 // Serial0 (UART0/CH340) → Debug log + Serial Monitor (noi voi Laptop)
 //
 // Tren board Freenove ESP32-S3 co 2 cong USB Type-C:
 //   Cong "UART" (CH340) = Serial0 → dung cho nap code + debug
-//   Cong "USB"  (native) = Serial  → dung cho micro-ROS
+//   Cong "USB"  (native) = Serial  → dung cho raw serial V2
 #define DBG Serial0
 
 #endif // ROBOT_CONFIG_H

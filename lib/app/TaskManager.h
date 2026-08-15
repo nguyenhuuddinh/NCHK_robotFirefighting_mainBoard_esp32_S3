@@ -37,14 +37,22 @@ struct SharedContext {
 /** Task dieu khien chuyen dong (Core 1, Priority cao nhat) */
 void Task_Motion(void* pvParam);
 
-/** Task micro-ROS communication (Core 0, Priority 3) */
+/** Task micro-ROS communication (Core 0, Priority 3) — legacy, giữ để compile rollback */
 void Task_MicroROS(void* pvParam);
 
-/** Task xu ly Web Server (Core 0 — tam, se thay bang micro-ROS) */
-void Task_WebServer(void* pvParam);
+/** Task raw serial V2 communication (Core 0, Priority 3) — thay thế Task_MicroROS */
+void Task_SerialComm(void* pvParam);
 
 /** Task in debug log (Core 0, Priority thap) */
 void Task_Logger(void* pvParam);
+
+// Bat macro nay neu can fallback Web Server de test motor nhanh (tat di de uu tien micro-ROS)
+// #define ENABLE_WEB_FALLBACK
+
+/** Task WebServer (Core 0) - [Finding 3] Giu lai fallback nhung disable de giam tai SLAM */
+#ifdef ENABLE_WEB_FALLBACK
+void Task_WebServer(void* pvParam);
+#endif
 
 /** Task nhan du lieu tu WROOM qua UART + gui lenh actuator (Core 0) */
 void Task_UART(void* pvParam);

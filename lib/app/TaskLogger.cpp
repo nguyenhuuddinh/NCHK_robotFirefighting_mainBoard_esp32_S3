@@ -24,17 +24,22 @@ void Task_Logger(void* pvParam) {
         wz = ctx->cmdVel.target_wz;
         xSemaphoreGive(ctx->cmdMutex);
 
-        // [IMU] Log lien tuc de phat hien drift — in CA KHI IDLE
-        // Neu robot dung yen ma gyro_z != 0 hoac theta thay doi → IMU bi troi
-        DBG.printf("[IMU] gyro_z:%+.4f rad/s  yaw:%.3f rad (%.1f deg)\n",
-                      s.gyro_z, s.theta, s.theta * 180.0f / PI);
-
-        // Im lang phan log chi tiet khi dung va khong co lenh (IDLE hoac EMERGENCY)
+        // Im lang phan log chi tiet khi IDLE hoac EMERGENCY (tránh spam log liên tục)
         RobotState_t currentState = robotMaster.getState();
-        if (vx == 0.0f && wz == 0.0f &&
-            (currentState == STATE_IDLE || currentState == STATE_EMERGENCY)) {
+        if (currentState == STATE_IDLE || currentState == STATE_EMERGENCY) {
+            // [Finding 7 FIX] Van in log IMU cham (moi ~5 giay) de phat hien drift
+            static int idle_log_div = 0;
+            if (++idle_log_div >= 50) {
+                idle_log_div = 0;
+                DBG.printf("[IMU-IDLE] gyro_z:%+.4f rad/s  yaw:%.3f rad (%.1f deg)\n",
+                              s.gyro_z, s.theta, s.theta * 180.0f / PI);
+            }
             continue;
         }
+
+        // [IMU] Log de phat hien drift khi dang chay
+        DBG.printf("[IMU] gyro_z:%+.4f rad/s  yaw:%.3f rad (%.1f deg)\n",
+                      s.gyro_z, s.theta, s.theta * 180.0f / PI);
 
         // Header: hien thi buoc dang chay va trang thai
         DBG.printf("[%s] Vx=%.2f Wz=%.2f\n",
@@ -56,8 +61,16 @@ void Task_Logger(void* pvParam) {
                       s.x, s.y, s.theta, s.theta * 180.0f / PI, s.alpha);
 
         // Hien thi du lieu cam bien tu WROOM (neu co)
-        if (ctx->sensorDataValid) {
-            SensorPacket_t sd = ctx->lastSensorData;
+        bool dataValid;
+        SensorPacket_t sd;
+        xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
+        dataValid = ctx->sensorDataValid;
+        if (dataValid) {
+            sd = ctx->lastSensorData;
+        }
+        xSemaphoreGive(ctx->stateMutex);
+
+        if (dataValid) {
             DBG.printf("[ENV] Fire:%d%d%d Gas:%.1fppm Temp:%.1f°C Batt:%.2fV\n",
                           (sd.fire_flags >> 2) & 1,
                           (sd.fire_flags >> 1) & 1,

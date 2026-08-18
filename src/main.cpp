@@ -44,8 +44,8 @@ void setup() {
     //   Serial  (USB CDC) = Raw Serial V2 transport → Raspberry Pi
     //   Serial0 (UART0/CH340) = Debug log → Laptop Serial Monitor
     Serial.setRxBufferSize(4096);  // Tăng bộ đệm nhận USB CDC từ 256 lên 4096 bytes
-    Serial.setTxBufferSize(256);   // [F2-L2-1] Tăng TX buffer > 192 bytes (mặc định TinyUSB là 64 bytes)
-    Serial.setTxTimeoutMs(0);      // [F2-L2-1] Đảm bảo hàm write() trả về ngay lập tức (non-blocking)
+    // [F2-L13-1] USBCDC không có setTxBufferSize. Fixed 64 byte.
+    Serial.setTxTimeoutMs(0);      // Đảm bảo hàm write() trả về ngay lập tức (non-blocking)
     Serial.begin(115200);   // USB CDC cho Raw Serial V2
     DBG.begin(115200);      // UART0/CH340 cho debug
     vTaskDelay(pdMS_TO_TICKS(800)); // Cho Serial on dinh

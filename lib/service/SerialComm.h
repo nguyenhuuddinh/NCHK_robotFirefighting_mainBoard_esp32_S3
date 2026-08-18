@@ -34,13 +34,14 @@
 // ============================================================
 static const uint8_t  SERIAL_PROTOCOL_VERSION = 2;
 static const size_t   SERIAL_MAX_FRAME_SIZE   = 192;
-static const size_t   SERIAL_BUFFER_SIZE      = SERIAL_MAX_FRAME_SIZE + 1; // +1 cho null-terminator
+static const size_t   SERIAL_BUFFER_SIZE      = SERIAL_MAX_FRAME_SIZE + 1; // [F2-L15-4] 193 byte: 192 byte wire limit + 1 NUL terminator cho encoder
 
 // ============================================================
 // DIAGNOSTIC COUNTERS
 // ============================================================
 struct SerialCommTelemetry {
     // RX counters
+    uint32_t raw_rx_bytes    = 0;  // [F2-L11-1] Diagnostics raw byte đọc được
     uint32_t rx_valid        = 0;  // Frame hợp lệ (CRC + parse OK)
     uint32_t rx_crc_fail     = 0;  // CRC sai
     uint32_t rx_parse_fail   = 0;  // CRC đúng nhưng parse fail (field/range)
@@ -50,11 +51,15 @@ struct SerialCommTelemetry {
     uint32_t rx_seq_gap      = 0;  // Sequence gap (mất frame)
     uint32_t rx_seq_dup      = 0;  // Sequence duplicate
 
-    // TX counters
-    uint32_t tx_state        = 0;  // STATE frames sent OK
-    uint32_t tx_env          = 0;  // ENV frames sent OK
-    uint32_t tx_drop         = 0;  // Frame dropped (buffer full / serial busy)
-    uint32_t tx_partial      = 0;  // Partial write (gửi không đủ bytes)
+    // TX counters (Segmented Queue)
+    uint32_t tx_generated    = 0;  // Frame được tạo ra
+    uint32_t tx_queued       = 0;  // Frame được đẩy vào internal queue
+    uint32_t tx_completed    = 0;  // Frame hoàn tất gửi (all chunks sent)
+    uint32_t tx_drop         = 0;  // Frame bị bỏ (offline, NaN, queue đầy)
+    uint32_t tx_partial      = 0;  // Chunk bị partial write / abort slot
+
+    // USB CDC Events
+    uint32_t usb_events      = 0;
 
     // CMD age
     uint32_t last_valid_cmd_ms = 0; // millis() lúc nhận CMD hợp lệ cuối
@@ -94,7 +99,7 @@ uint16_t serialCrc16(const char* payload, size_t len);
 /**
  * @brief Format một frame hoàn chỉnh @PAYLOAD*CCCC\n vào buffer tĩnh
  *
- * @param outBuf   Buffer đích (phải >= SERIAL_MAX_FRAME_SIZE)
+ * @param outBuf   Buffer đích (phải >= SERIAL_BUFFER_SIZE (193))
  * @param outSize  Kích thước buffer đích
  * @param payload  Chuỗi PAYLOAD đã được format (không gồm @, *, CRC, LF)
  * @return Số byte đã format (bao gồm \n), hoặc 0 nếu overflow

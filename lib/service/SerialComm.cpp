@@ -51,7 +51,8 @@ size_t serialEncodeFrame(char* outBuf, size_t outSize, const char* payload) {
 
     // @PAYLOAD*CCCC\n = 1 + payloadLen + 1 + 4 + 1 = payloadLen + 7
     size_t totalLen = payloadLen + 7;
-    if (totalLen > outSize || totalLen > SERIAL_MAX_FRAME_SIZE) {
+    // [F2-L14-3] Mức wire max là 192. outBuf phải đủ để chứa NUL (tức outSize >= totalLen + 1).
+    if (totalLen > SERIAL_MAX_FRAME_SIZE || totalLen >= outSize) {
         return 0; // Overflow
     }
 

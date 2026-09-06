@@ -267,6 +267,143 @@ void test_temporary_avail_zero_and_deadline_wrap(void) {
     TEST_ASSERT_EQUAL(1, sm.consecutive_partials);
 }
 
+void test_usb_recovery_detach_is_one_shot(void) {
+    UsbRecoveryController recovery;
+
+    TEST_ASSERT_FALSE(recovery.armed());
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::NONE, recovery.request(999));
+    recovery.observeValidRx();
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(1000));
+    TEST_ASSERT_TRUE(recovery.active());
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::NONE, recovery.request(1010, 250));
+    TEST_ASSERT_EQUAL(UsbRecoveryAction::NONE, recovery.poll(1999));
+    TEST_ASSERT_TRUE(recovery.active());
+    TEST_ASSERT_EQUAL(UsbRecoveryAction::ATTACH, recovery.poll(2000));
+    TEST_ASSERT_FALSE(recovery.active());
+    TEST_ASSERT_EQUAL(UsbRecoveryAction::NONE, recovery.poll(2001));
+}
+
+void test_usb_recovery_deadline_wrap(void) {
+    UsbRecoveryController recovery;
+
+    recovery.observeValidRx();
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH,
+        recovery.request(UINT32_MAX - 99, 250));
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::NONE, recovery.poll(UINT32_MAX - 1));
+    TEST_ASSERT_EQUAL(UsbRecoveryAction::NONE, recovery.poll(149));
+    TEST_ASSERT_EQUAL(UsbRecoveryAction::ATTACH, recovery.poll(150));
+}
+
+void test_usb_recovery_can_run_again_after_attach(void) {
+    UsbRecoveryController recovery;
+
+    recovery.observeValidRx();
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(10, 1));
+    TEST_ASSERT_EQUAL(UsbRecoveryAction::ATTACH, recovery.poll(11));
+    TEST_ASSERT_FALSE(recovery.armed());
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::NONE, recovery.request(20, 1));
+
+    recovery.observeValidRx();
+    TEST_ASSERT_TRUE(recovery.armed());
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(21, 1));
+}
+
+void test_usb_recovery_retries_failed_host_enumeration(void) {
+    UsbRecoveryController recovery;
+
+    recovery.observeValidRx();
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(100, 1000));
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::ATTACH, recovery.poll(1100, 3000));
+    TEST_ASSERT_TRUE(recovery.retryPending());
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::NONE, recovery.request(4099, 1000));
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(4100, 1000));
+    TEST_ASSERT_FALSE(recovery.retryPending());
+}
+
+void test_valid_rx_cancels_failed_enumeration_retry(void) {
+    UsbRecoveryController recovery;
+
+    recovery.observeValidRx();
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(100, 1000));
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::ATTACH, recovery.poll(1100, 3000));
+    recovery.observeValidRx();
+    TEST_ASSERT_FALSE(recovery.retryPending());
+
+    // A later genuine session failure is still eligible immediately because
+    // valid RX re-armed the normal one-shot recovery path.
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(1200, 1000));
+}
+
+void test_usb_recovery_retry_deadline_wrap(void) {
+    UsbRecoveryController recovery;
+
+    recovery.observeValidRx();
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH,
+        recovery.request(UINT32_MAX - 199, 100));
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::ATTACH,
+        recovery.poll(UINT32_MAX - 99, 250));
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::NONE, recovery.request(149, 100));
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(150, 100));
+}
+
+void test_usb_recovery_valid_rx_arm_survives_line_state_drop(void) {
+    UsbRecoveryController recovery;
+
+    // The controller deliberately has no dependency on the instantaneous DTR
+    // line state. A valid host frame remains sufficient evidence to perform
+    // one physical detach if DTR falls before recovery is serviced.
+    recovery.observeValidRx();
+    TEST_ASSERT_TRUE(recovery.armed());
+    TEST_ASSERT_EQUAL(
+        UsbRecoveryAction::DETACH, recovery.request(100, 1000));
+    TEST_ASSERT_FALSE(recovery.armed());
+    TEST_ASSERT_EQUAL(UsbRecoveryAction::NONE, recovery.request(101, 1000));
+}
+
+void test_valid_rx_cannot_hide_three_tx_stalls(void) {
+    TxLivenessStateMachine local_sm;
+
+    local_sm.state = SessionState::ONLINE;
+    local_sm.last_tx_event_cnt = 77;
+    local_sm.consecutive_partials = 3;
+    local_sm.update(true, 77, true);
+
+    TEST_ASSERT_TRUE(local_sm.recovery_pending);
+    TEST_ASSERT_EQUAL(3, local_sm.consecutive_partials);
+}
+
+void test_tx_complete_event_clears_stall_evidence(void) {
+    TxLivenessStateMachine local_sm;
+
+    local_sm.state = SessionState::ONLINE;
+    local_sm.last_tx_event_cnt = UINT32_MAX;
+    local_sm.consecutive_partials = 2;
+    local_sm.update(true, 0, true);
+
+    TEST_ASSERT_FALSE(local_sm.recovery_pending);
+    TEST_ASSERT_EQUAL(0, local_sm.consecutive_partials);
+    TEST_ASSERT_EQUAL(0, local_sm.last_tx_event_cnt);
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_dtr_fall_and_cleanup_recovery);
@@ -281,5 +418,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_actual_partial_abort_resync_parser);
     RUN_TEST(test_scheduler_rate);
     RUN_TEST(test_temporary_avail_zero_and_deadline_wrap);
+    RUN_TEST(test_usb_recovery_detach_is_one_shot);
+    RUN_TEST(test_usb_recovery_deadline_wrap);
+    RUN_TEST(test_usb_recovery_can_run_again_after_attach);
+    RUN_TEST(test_usb_recovery_retries_failed_host_enumeration);
+    RUN_TEST(test_valid_rx_cancels_failed_enumeration_retry);
+    RUN_TEST(test_usb_recovery_retry_deadline_wrap);
+    RUN_TEST(test_usb_recovery_valid_rx_arm_survives_line_state_drop);
+    RUN_TEST(test_valid_rx_cannot_hide_three_tx_stalls);
+    RUN_TEST(test_tx_complete_event_clears_stall_evidence);
     return UNITY_END();
 }

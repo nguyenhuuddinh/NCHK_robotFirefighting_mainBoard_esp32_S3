@@ -26,6 +26,8 @@
 #include "RobotMaster.h"
 #include <Arduino.h>
 #include <math.h>
+#include <soc/usb_wrap_struct.h>
+#include <tusb.h>
 
 // TX Ring Queue moved to TxLivenessStateMachine in SerialComm.h
 
@@ -191,11 +193,20 @@ void Task_SerialComm(void* pvParam) {
         // 1. Khai báo các trạng thái liveness/probe tĩnh
         static TxLivenessStateMachine sm;
         static TxScheduler txSched;
+        static UsbRecoveryController usbRecovery;
         static uint32_t s_last_probe_ms = 0;
         static uint32_t s_last_disconnect_epoch = 0;
         static bool     s_discarding = false;
 
         bool fast_disconnect = false;
+
+        if (usbRecovery.poll(now) == UsbRecoveryAction::ATTACH) {
+            DBG.println("[SERIAL] USB CDC recovery reconnect");
+            USB_WRAP.otg_conf.pad_enable = true;
+            if (!tud_connect()) {
+                DBG.println("[SERIAL] USB CDC reconnect request failed");
+            }
+        }
 
         // [F2-L17-1] Helper cleanup idempotent
         auto cleanup_session = [&]() {
@@ -248,6 +259,11 @@ void Task_SerialComm(void* pvParam) {
                     continue;
                 }
                 valid_rx_activity = true;
+                if (usbRecovery.observeValidRx()) {
+                    DBG.printf(
+                        "[SERIAL] USB recovery armed by valid RX type=%d\n",
+                        (int)rx.type);
+                }
                 handleRxFrame(rx, ctx);
             }
         }
@@ -281,6 +297,34 @@ void Task_SerialComm(void* pvParam) {
                 DBG.println("[SERIAL] USB host disconnected or stalled -> Recovery");
             }
             cleanup_session(); // resets sm internally, clears recovery_pending
+
+            // A software queue reset cannot release a TinyUSB endpoint whose
+            // host stopped draining data. Clear both CDC streams, then force
+            // a short USB detach so Linux aborts pending URBs and reopens a
+            // fresh endpoint. The controller makes this one-shot and
+            // non-blocking; motor/watchdog tasks continue running.
+            // DTR may fall before this task observes a wedged TX endpoint.
+            // UsbRecoveryController's valid-RX arm is the liveness proof; do
+            // not require the current line state or the detach can be skipped.
+            if (usbRecovery.request(now) == UsbRecoveryAction::DETACH) {
+                DBG.println("[SERIAL] USB CDC stalled -> soft reconnect");
+                tud_cdc_n_write_clear(0);
+                tud_cdc_n_read_flush(0);
+                // Soft detach does not guarantee that Arduino's asynchronous
+                // CDC event loop runs before the next task iteration. Invalidate
+                // the cached line state synchronously so stale DTR cannot arm
+                // probes against the detached endpoint.
+                s_dtr_active = false;
+                s_disconnect_epoch++;
+                if (!tud_disconnect()) {
+                    DBG.println("[SERIAL] USB CDC disconnect request failed");
+                }
+                // ESP32-S3's DWC soft-disconnect bit is not reliably
+                // observable by Linux after repeated recoveries. Gate the
+                // internal PHY pad as well so every recovery produces a real
+                // D+/D- disconnect without rebooting the controller.
+                USB_WRAP.otg_conf.pad_enable = false;
+            }
         }
 
         bool hostNow = (sm.state == SessionState::ONLINE);

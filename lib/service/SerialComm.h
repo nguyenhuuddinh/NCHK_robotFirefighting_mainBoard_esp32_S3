@@ -203,6 +203,34 @@ enum class SessionState {
     ONLINE
 };
 
+enum class UsbRecoveryAction {
+    NONE,
+    DETACH,
+    ATTACH
+};
+
+class UsbRecoveryController {
+public:
+    UsbRecoveryAction request(uint32_t now, uint32_t detach_ms = 1000);
+    UsbRecoveryAction poll(uint32_t now, uint32_t retry_ms = 3000);
+    bool observeValidRx() {
+        const bool changed = !recovery_armed_;
+        recovery_armed_ = true;
+        retry_pending_ = false;
+        return changed;
+    }
+    bool active() const { return active_; }
+    bool armed() const { return recovery_armed_; }
+    bool retryPending() const { return retry_pending_; }
+
+private:
+    bool active_ = false;
+    bool recovery_armed_ = false;
+    bool retry_pending_ = false;
+    uint32_t reconnect_deadline_ms_ = 0;
+    uint32_t retry_not_before_ms_ = 0;
+};
+
 struct TxSlot {
     char data[SERIAL_BUFFER_SIZE];
     uint16_t len;
@@ -224,6 +252,7 @@ public:
 
     // Probe arming state
     uint32_t probe_armed_tx_event_cnt = 0;
+    uint32_t last_tx_event_cnt = 0;
     bool probe_armed = false;
 
     // Transition flags

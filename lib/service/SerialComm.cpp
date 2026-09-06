@@ -504,10 +504,49 @@ bool SerialParser::parseFrame_(const char* frame, size_t len,
 // ============================================================
 // LIVENESS STATE MACHINE & TX PUMP
 // ============================================================
+UsbRecoveryAction UsbRecoveryController::request(uint32_t now,
+                                                 uint32_t detach_ms) {
+    const bool retry_due = retry_pending_
+        && (int32_t)(now - retry_not_before_ms_) >= 0;
+    if (active_ || (!recovery_armed_ && !retry_due)) {
+        return UsbRecoveryAction::NONE;
+    }
+
+    active_ = true;
+    recovery_armed_ = false;
+    retry_pending_ = false;
+    reconnect_deadline_ms_ = now + detach_ms;
+    return UsbRecoveryAction::DETACH;
+}
+
+UsbRecoveryAction UsbRecoveryController::poll(uint32_t now,
+                                              uint32_t retry_ms) {
+    if (!active_ || (int32_t)(now - reconnect_deadline_ms_) < 0) {
+        return UsbRecoveryAction::NONE;
+    }
+
+    active_ = false;
+    // A physical attach is only a request to the USB controller. If Linux
+    // never reopens the CDC session, no valid RX can re-arm the normal
+    // one-shot path. Permit another detach after a bounded enumeration grace;
+    // observeValidRx() cancels this retry as soon as the host is healthy.
+    retry_pending_ = true;
+    retry_not_before_ms_ = now + retry_ms;
+    return UsbRecoveryAction::ATTACH;
+}
+
 void TxLivenessStateMachine::update(bool dtr, uint32_t current_tx_evt,
                                     bool valid_rx_activity) {
     if (recovery_pending) {
         return;
+    }
+
+    // Only TinyUSB's TX-complete event proves that the host drained outbound
+    // data. RX can remain healthy while the IN endpoint is wedged, and a full
+    // Serial.write() can mean only that bytes entered a local USB buffer.
+    if (current_tx_evt != last_tx_event_cnt) {
+        last_tx_event_cnt = current_tx_evt;
+        consecutive_partials = 0;
     }
 
     // A completely parsed command is stronger host-liveness evidence than
@@ -515,8 +554,10 @@ void TxLivenessStateMachine::update(bool dtr, uint32_t current_tx_evt,
     // when TinyUSB does not emit another TX-complete event.
     if (valid_rx_activity) {
         state = SessionState::ONLINE;
-        consecutive_partials = 0;
         probe_armed = false;
+        if (consecutive_partials >= 3) {
+            recovery_pending = true;
+        }
         return;
     }
 
@@ -614,7 +655,6 @@ void TxLivenessStateMachine::pump_tx(uint32_t now,
                     head->offset += written;
                     if (head->offset >= head->len) {
                         telemetry.tx_completed++;
-                        consecutive_partials = 0;
                         tx_count--;
                         tx_head = (tx_head + 1) % 2;
 
@@ -636,6 +676,7 @@ void TxLivenessStateMachine::reset() {
     consecutive_partials = 0;
     recovery_pending = false;
     probe_armed = false;
+    last_tx_event_cnt = 0;
     tx_head = 0;
     tx_tail = 0;
     tx_count = 0;

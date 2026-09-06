@@ -117,6 +117,46 @@ void test_probe_retry_recovers_from_missed_event(void) {
     TEST_ASSERT_EQUAL(SessionState::ONLINE, sm.state);
 }
 
+void test_valid_rx_activity_recovers_without_tx_event(void) {
+    sm.state = SessionState::PROBING;
+
+    char frame[128];
+    const size_t length = serialEncodeFrame(
+        frame, sizeof(frame), "CMD,2,1,0.0,0.0");
+    SerialRxResult rx;
+    bool valid_rx_activity = false;
+
+    for (size_t i = 0; i < length; i++) {
+        if (parser.feed(frame[i], rx, telemetry)) {
+            valid_rx_activity = true;
+        }
+    }
+
+    TEST_ASSERT_TRUE(valid_rx_activity);
+    TEST_ASSERT_EQUAL(RX_CMD, rx.type);
+    sm.update(false, s_usb_tx_event_cnt, valid_rx_activity);
+    TEST_ASSERT_EQUAL(SessionState::ONLINE, sm.state);
+    TEST_ASSERT_FALSE(sm.probe_armed);
+}
+
+void test_invalid_rx_cannot_confirm_liveness(void) {
+    sm.state = SessionState::PROBING;
+
+    const char* invalid_frame = "@CMD,2,broken\n";
+    SerialRxResult rx;
+    bool valid_rx_activity = false;
+
+    for (size_t i = 0; invalid_frame[i] != '\0'; i++) {
+        if (parser.feed(invalid_frame[i], rx, telemetry)) {
+            valid_rx_activity = true;
+        }
+    }
+
+    TEST_ASSERT_FALSE(valid_rx_activity);
+    sm.update(true, s_usb_tx_event_cnt, valid_rx_activity);
+    TEST_ASSERT_EQUAL(SessionState::PROBING, sm.state);
+}
+
 void test_combined_cleanup_prevents_stale_gap(void) {
     // feed CMD hợp lệ seq=100 để tạo sequence history
     char buf1[128];
@@ -235,6 +275,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_stale_event_before_arm_is_absorbed);
     RUN_TEST(test_probe_event_counter_wrap_goes_online);
     RUN_TEST(test_probe_retry_recovers_from_missed_event);
+    RUN_TEST(test_valid_rx_activity_recovers_without_tx_event);
+    RUN_TEST(test_invalid_rx_cannot_confirm_liveness);
     RUN_TEST(test_combined_cleanup_prevents_stale_gap);
     RUN_TEST(test_actual_partial_abort_resync_parser);
     RUN_TEST(test_scheduler_rate);

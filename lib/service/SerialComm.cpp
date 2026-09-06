@@ -504,8 +504,19 @@ bool SerialParser::parseFrame_(const char* frame, size_t len,
 // ============================================================
 // LIVENESS STATE MACHINE & TX PUMP
 // ============================================================
-void TxLivenessStateMachine::update(bool dtr, uint32_t current_tx_evt) {
+void TxLivenessStateMachine::update(bool dtr, uint32_t current_tx_evt,
+                                    bool valid_rx_activity) {
     if (recovery_pending) {
+        return;
+    }
+
+    // A completely parsed command is stronger host-liveness evidence than
+    // DTR or a CDC TX callback. This path lets a reopened host recover even
+    // when TinyUSB does not emit another TX-complete event.
+    if (valid_rx_activity) {
+        state = SessionState::ONLINE;
+        consecutive_partials = 0;
+        probe_armed = false;
         return;
     }
 

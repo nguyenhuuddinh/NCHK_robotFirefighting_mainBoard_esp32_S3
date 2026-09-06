@@ -217,6 +217,7 @@ void Task_SerialComm(void* pvParam) {
         // BẮT BUỘC NẰM TRƯỚC TÍNH TOÁN hostNow VÀ TX PUMP
         // ========================================================
         int rxBudget = 512;
+        bool valid_rx_activity = false;
 
         while (Serial.available() > 0 && rxBudget > 0) {
             if (s_disconnect_epoch != s_last_disconnect_epoch) {
@@ -246,6 +247,7 @@ void Task_SerialComm(void* pvParam) {
                     cleanup_session();
                     continue;
                 }
+                valid_rx_activity = true;
                 handleRxFrame(rx, ctx);
             }
         }
@@ -268,7 +270,8 @@ void Task_SerialComm(void* pvParam) {
             sm.reset();
             fast_disconnect = false;
         } else {
-            sm.update(s_dtr_active, s_usb_tx_event_cnt);
+            sm.update(
+                s_dtr_active, s_usb_tx_event_cnt, valid_rx_activity);
         }
 
         // [F2-L26-1] Nếu state machine yêu cầu recovery (DTR drop hoặc >= 3 TX stall),

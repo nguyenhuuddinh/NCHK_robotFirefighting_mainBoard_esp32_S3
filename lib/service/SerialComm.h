@@ -229,7 +229,8 @@ public:
     // Transition flags
     bool recovery_pending = false;
 
-    void update(bool dtr, uint32_t current_tx_evt);
+    void update(bool dtr, uint32_t current_tx_evt,
+                bool valid_rx_activity = false);
     void reset();
 
     bool enqueue(const char* payload, uint8_t type, uint32_t deadline_ms,

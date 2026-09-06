@@ -500,3 +500,132 @@ bool SerialParser::parseFrame_(const char* frame, size_t len,
     telemetry.rx_parse_fail++;
     return false;
 }
+
+// ============================================================
+// LIVENESS STATE MACHINE & TX PUMP
+// ============================================================
+void TxLivenessStateMachine::update(bool dtr, uint32_t current_tx_evt) {
+    if (recovery_pending) {
+        return;
+    }
+
+    if (!dtr) {
+        recovery_pending = true;
+        return;
+    }
+
+    switch (state) {
+        case SessionState::OFFLINE:
+            state = SessionState::PROBING;
+            break;
+        case SessionState::PROBING:
+            // [F2-L26-2] Chỉ TX progress sau khi probe được arm mới đưa ONLINE
+            if (probe_armed) {
+                if (current_tx_evt != probe_armed_tx_event_cnt) {
+                    state = SessionState::ONLINE;
+                    consecutive_partials = 0;
+                    probe_armed = false;
+                }
+            }
+            break;
+        case SessionState::ONLINE:
+            if (consecutive_partials >= 3) {
+                recovery_pending = true; // [F2-L26-1] Caller must consume this and run cleanup
+            }
+            break;
+    }
+}
+
+bool TxLivenessStateMachine::enqueue(const char* payload, uint8_t type,
+                                     uint32_t deadline_ms,
+                                     SerialCommTelemetry& telemetry) {
+    telemetry.tx_generated++;
+    if (tx_count >= 2) {
+        telemetry.tx_drop++;
+        return false;
+    }
+
+    size_t len = serialEncodeFrame(tx_queue[tx_tail].data, SERIAL_BUFFER_SIZE, payload);
+    if (len > 0) {
+        tx_queue[tx_tail].len = len;
+        tx_queue[tx_tail].offset = 0;
+        tx_queue[tx_tail].type = type;
+        tx_queue[tx_tail].deadline_ms = deadline_ms;
+
+        tx_tail = (tx_tail + 1) % 2;
+        tx_count++;
+        telemetry.tx_queued++;
+        return true;
+    }
+    telemetry.tx_drop++;
+    return false;
+}
+
+bool TxLivenessStateMachine::enqueue_probe(
+        const char* payload, uint32_t deadline_ms,
+        volatile uint32_t* event_cnt_ptr,
+        SerialCommTelemetry& telemetry) {
+    // Capture the event generation before the probe can be written. TinyUSB
+    // may dispatch TX-complete synchronously from Serial.write(); sampling
+    // after the write would absorb that proof and leave the session PROBING.
+    const uint32_t baseline = *event_cnt_ptr;
+    if (!enqueue(payload, 3, deadline_ms, telemetry)) {
+        return false;
+    }
+
+    probe_armed_tx_event_cnt = baseline;
+    probe_armed = true;
+    return true;
+}
+
+void TxLivenessStateMachine::pump_tx(uint32_t now,
+                                     SerialCommTelemetry& telemetry) {
+    if (recovery_pending || state == SessionState::OFFLINE) return;
+
+    if (tx_count > 0) {
+        TxSlot* head = &tx_queue[tx_head];
+
+        if ((int32_t)(now - head->deadline_ms) >= 0) {
+            telemetry.tx_partial++;
+            consecutive_partials++;
+            tx_count--;
+            tx_head = (tx_head + 1) % 2;
+        } else {
+            size_t remaining = head->len - head->offset;
+            size_t avail = Serial.availableForWrite();
+            size_t chunk = remaining;
+            if (chunk > 64) chunk = 64;
+            if (chunk > avail) chunk = avail;
+
+            if (chunk > 0) {
+                size_t written = Serial.write((const uint8_t*)&head->data[head->offset], chunk);
+                if (written == chunk) {
+                    head->offset += written;
+                    if (head->offset >= head->len) {
+                        telemetry.tx_completed++;
+                        consecutive_partials = 0;
+                        tx_count--;
+                        tx_head = (tx_head + 1) % 2;
+
+                    }
+                } else {
+                    // [F2-L24-3] Partial write -> Abort ngay lập tức, resync ở delimiter
+                    telemetry.tx_partial++;
+                    consecutive_partials++;
+                    tx_count--;
+                    tx_head = (tx_head + 1) % 2;
+                }
+            }
+        }
+    }
+}
+
+void TxLivenessStateMachine::reset() {
+    state = SessionState::OFFLINE;
+    consecutive_partials = 0;
+    recovery_pending = false;
+    probe_armed = false;
+    tx_head = 0;
+    tx_tail = 0;
+    tx_count = 0;
+}

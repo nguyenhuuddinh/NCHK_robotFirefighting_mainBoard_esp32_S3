@@ -192,3 +192,76 @@ private:
     bool parseFrame_(const char* frame, size_t len,
                      SerialRxResult& result, SerialCommTelemetry& telemetry);
 };
+
+// ============================================================
+// LIVENESS STATE MACHINE & TX PUMP
+// ============================================================
+
+enum class SessionState {
+    OFFLINE,
+    PROBING,
+    ONLINE
+};
+
+struct TxSlot {
+    char data[SERIAL_BUFFER_SIZE];
+    uint16_t len;
+    uint16_t offset;
+    uint8_t type; // 1=STATE, 2=ENV, 3=PROBE
+    uint32_t deadline_ms;
+};
+
+class TxLivenessStateMachine {
+public:
+    SessionState state = SessionState::OFFLINE;
+    uint32_t consecutive_partials = 0;
+
+    // TX Ring Queue
+    TxSlot tx_queue[2];
+    uint8_t tx_head = 0;
+    uint8_t tx_tail = 0;
+    uint8_t tx_count = 0;
+
+    // Probe arming state
+    uint32_t probe_armed_tx_event_cnt = 0;
+    bool probe_armed = false;
+
+    // Transition flags
+    bool recovery_pending = false;
+
+    void update(bool dtr, uint32_t current_tx_evt);
+    void reset();
+
+    bool enqueue(const char* payload, uint8_t type, uint32_t deadline_ms,
+                 SerialCommTelemetry& telemetry);
+    bool enqueue_probe(const char* payload, uint32_t deadline_ms,
+                       volatile uint32_t* event_cnt_ptr,
+                       SerialCommTelemetry& telemetry);
+    void pump_tx(uint32_t now, SerialCommTelemetry& telemetry);
+};
+
+class TxScheduler {
+public:
+    uint8_t stateDivider = 0;
+    uint8_t envDivider = 0;
+    bool state_due = false;
+    bool env_due = false;
+
+    void tick() {
+        stateDivider++;
+        if (stateDivider >= 5) {
+            stateDivider = 0;
+            state_due = true;
+        } else {
+            state_due = false;
+        }
+
+        envDivider++;
+        if (envDivider >= 25) {
+            envDivider = 0;
+            env_due = true;
+        } else {
+            env_due = false;
+        }
+    }
+};

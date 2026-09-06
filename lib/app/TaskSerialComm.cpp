@@ -27,19 +27,7 @@
 #include <Arduino.h>
 #include <math.h>
 
-// [F2-L14-1] TinyUSB CDC Cooperative Segmented TX Queue (Ring FIFO)
-struct TxSlot {
-    char data[SERIAL_BUFFER_SIZE]; // [F2-L14-2]
-    uint16_t len;
-    uint16_t offset;
-    uint8_t type; // 1=STATE, 2=ENV, 3=PROBE
-    uint32_t deadline_ms;
-};
-
-static TxSlot s_txQueue[2];
-static volatile uint8_t s_txHead = 0;
-static volatile uint8_t s_txTail = 0;
-static volatile uint8_t s_txCount = 0;
+// TX Ring Queue moved to TxLivenessStateMachine in SerialComm.h
 
 extern RobotMaster robotMaster;
 
@@ -75,30 +63,7 @@ static void usb_event_cb(void* arg, esp_event_base_t event_base, int32_t event_i
     }
 }
 
-static bool enqueueFrame(const char* payload, uint8_t type, uint32_t deadline_ms) {
-    g_telemetry.tx_generated++;
-    // [F2-L14-1] Queue full -> drop
-    if (s_txCount >= 2) {
-        g_telemetry.tx_drop++;
-        return false;
-    }
 
-    // Encode into tail
-    size_t len = serialEncodeFrame(s_txQueue[s_txTail].data, SERIAL_BUFFER_SIZE, payload);
-    if (len > 0) {
-        s_txQueue[s_txTail].len = len;
-        s_txQueue[s_txTail].offset = 0;
-        s_txQueue[s_txTail].type = type;
-        s_txQueue[s_txTail].deadline_ms = deadline_ms;
-
-        s_txTail = (s_txTail + 1) % 2;
-        s_txCount++;
-        g_telemetry.tx_queued++;
-        return true;
-    }
-    g_telemetry.tx_drop++;
-    return false;
-}
 
 // [F2-3] TX sequence counter CHUNG cho cả STATE và ENV
 // Mỗi hướng truyền có MỘT bộ đếm. Tăng sau mỗi frame được tạo.
@@ -113,11 +78,10 @@ static uint8_t s_buzzer_on = 0;
 static char g_payloadBuf[SERIAL_BUFFER_SIZE];
 
 // [F2-L8-1] USB CDC connection detection
-// USBCDC operator bool() = isPlugged() && connected
-// Sau khi host process đóng port mà cáp vẫn cắm, operator bool có thể
-// vẫn true vô thời hạn (SOF vẫn chạy). Do đó KHÔNG dùng nó như liveness.
-// Host liveness chỉ dựa trên RX activity hoặc probe drain confirmation.
-// operator bool chỉ dùng như bootstrap hint có thời hạn.
+// DTR active chỉ mở state PROBING.
+// Trạng thái ONLINE chỉ đạt được sau khi có TX-complete event mới hơn
+// pre-write probe baseline.
+// DTR fall, disconnect, hoặc three partials sẽ đóng phiên.
 static bool g_lastHostConnected = false;
 
 // ============================================================
@@ -195,11 +159,6 @@ void Task_SerialComm(void* pvParam) {
     // Reset parser
     g_parser.reset();
 
-    // Divider cho TX: tại 20ms period
-    //   STATE @ 10Hz = mỗi 5 cycles (100ms)
-    //   ENV   @ 2Hz  = mỗi 25 cycles (500ms)
-    int stateDivider = 0;
-    int envDivider   = 0;
 
     // Divider cho telemetry log (mỗi 10 giây)
     uint32_t lastTelemetryMs = millis();
@@ -230,22 +189,11 @@ void Task_SerialComm(void* pvParam) {
         uint32_t now = millis();
 
         // 1. Khai báo các trạng thái liveness/probe tĩnh
-        static uint32_t s_last_rx_ms = 0;
-        static uint32_t s_last_tx_activity_ms = 0;
-        static uint32_t s_last_tx_event_cnt = 0;
-        static bool     s_probe_pending        = false;
-        static bool     s_probe_outstanding    = false;
-        static uint32_t s_last_probe_ms        = 0;
+        static TxLivenessStateMachine sm;
+        static TxScheduler txSched;
+        static uint32_t s_last_probe_ms = 0;
         static uint32_t s_last_disconnect_epoch = 0;
         static bool     s_discarding = false;
-
-        // Cập nhật drain activity
-        uint32_t current_tx_event_cnt = s_usb_tx_event_cnt;
-        if (current_tx_event_cnt != s_last_tx_event_cnt) {
-            s_last_tx_event_cnt = current_tx_event_cnt;
-            s_last_tx_activity_ms = now;
-            s_probe_outstanding = false;
-        }
 
         bool fast_disconnect = false;
 
@@ -254,11 +202,7 @@ void Task_SerialComm(void* pvParam) {
             s_last_disconnect_epoch = s_disconnect_epoch;
             fast_disconnect = true;
             g_parser.reset();
-            s_probe_pending = false;
-            s_probe_outstanding = false;
-            s_txHead = 0; s_txTail = 0; s_txCount = 0;
-            s_last_rx_ms = 0;
-            s_last_tx_activity_ms = 0;
+            sm.reset();
             g_lastHostConnected = false;
             s_discarding = true;
         };
@@ -295,8 +239,6 @@ void Task_SerialComm(void* pvParam) {
                 continue;
             }
 
-            s_last_rx_ms = now;
-
             SerialRxResult rx;
             if (g_parser.feed((uint8_t)b, rx, g_telemetry)) {
                 // (c) Checkpoint sau feed nhưng trước handleRxFrame
@@ -320,97 +262,35 @@ void Task_SerialComm(void* pvParam) {
         }
 
         // ========================================================
-        // 2. Tính/Recompute hostNow TỪ RX/TX ACTIVITY
+        // 2. Tính/Recompute hostNow TỪ LIVENESS STATE MACHINE
         // ========================================================
-        bool rx_active    = (s_last_rx_ms > 0 && (now - s_last_rx_ms < 2000));
-        bool drain_active = (s_last_tx_activity_ms > 0 && (now - s_last_tx_activity_ms < 2000));
-        bool hostNow = (rx_active || drain_active) && !fast_disconnect;
+        if (fast_disconnect) {
+            sm.reset();
+            fast_disconnect = false;
+        } else {
+            sm.update(s_dtr_active, s_usb_tx_event_cnt);
+        }
 
-        // Nếu disconnect
-        if (fast_disconnect || (!hostNow && g_lastHostConnected)) {
-            DBG.println("[SERIAL] USB host disconnected (event/timeout)");
-            g_parser.reset();
-            s_probe_pending = false;
-            s_probe_outstanding = false;
-            s_txHead = 0; s_txTail = 0; s_txCount = 0;
-            s_last_rx_ms = 0;
-            s_last_tx_activity_ms = 0;
-            hostNow = false;
-            s_discarding = true; // Bắt đầu vào discard mode cho cycle sau nếu còn byte
-        } else if (hostNow && !g_lastHostConnected) {
+        // [F2-L26-1] Nếu state machine yêu cầu recovery (DTR drop hoặc >= 3 TX stall),
+        // phải cleanup ngay để xóa stale queue/parser trước khi caller cho nó quay lại PROBING
+        if (sm.recovery_pending) {
+            if (g_lastHostConnected) {
+                DBG.println("[SERIAL] USB host disconnected or stalled -> Recovery");
+            }
+            cleanup_session(); // resets sm internally, clears recovery_pending
+        }
+
+        bool hostNow = (sm.state == SessionState::ONLINE);
+
+        if (hostNow && !g_lastHostConnected) {
             DBG.println("[SERIAL] USB host connected (Activity confirmed)");
-            // [F2-L16-1] KHÔNG reset parser ở đây để giữ last_rx_seq của frame đầu tiên
         }
         g_lastHostConnected = hostNow;
 
-        // --- Bootstrap hint ---
-        {
-            static bool s_last_bootstrap = false;
-            bool current_bootstrap = s_dtr_active || (Serial.availableForWrite() > 0);
-            if (current_bootstrap && !s_last_bootstrap && !fast_disconnect && !s_discarding) {
-                if (!s_probe_outstanding) {
-                    s_probe_pending = true;
-                }
-            }
-            s_last_bootstrap = current_bootstrap;
-        }
-
         // ========================================================
-        // [F2-L14-1] Cooperative Segmented TX Loop (Ring FIFO)
-        // Mỗi chu kỳ đẩy tối đa 64 byte để không block
+        // [F2-L27-1] Probe đã chốt TX-event baseline trước khi vào pump.
         // ========================================================
-        if ((hostNow || s_probe_pending || s_probe_outstanding) && s_txCount > 0) {
-            TxSlot* head = &s_txQueue[s_txHead];
-            const bool failed_probe = (head->type == 3);
-
-            // [F2-L14-5] Wrap-safe deadline check
-            if ((int32_t)(now - head->deadline_ms) >= 0) {
-                g_telemetry.tx_partial++;
-                s_txCount--;
-                s_txHead = (s_txHead + 1) % 2;
-                if (failed_probe) {
-                    s_probe_outstanding = false;
-                    s_probe_pending = false;
-                }
-            } else {
-                size_t remaining = head->len - head->offset;
-                size_t avail = Serial.availableForWrite();
-                size_t chunk = remaining;
-                if (chunk > 64) chunk = 64;
-                if (chunk > avail) chunk = avail;
-
-                if (chunk > 0) {
-                    size_t written = Serial.write((const uint8_t*)&head->data[head->offset], chunk);
-                    if (written == chunk) {
-                        head->offset += written;
-                        if (head->offset >= head->len) {
-                            g_telemetry.tx_completed++;
-                            s_txCount--;
-                            s_txHead = (s_txHead + 1) % 2;
-                        }
-                    } else {
-                        // [F2-L14-4] written == 0 hoặc written < chunk -> Abort ngay
-                        g_telemetry.tx_partial++;
-                        s_txCount--;
-                        s_txHead = (s_txHead + 1) % 2;
-                        if (failed_probe) {
-                            s_probe_outstanding = false;
-                            s_probe_pending = false;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Probe scheduling
-        if (hostNow) {
-            s_probe_pending = false;
-            s_probe_outstanding = false;
-        } else {
-            if (!s_probe_outstanding && (now - s_last_probe_ms >= 500)) {
-                s_probe_pending = true;
-            }
-        }
+        sm.pump_tx(now, g_telemetry);
 
         // ========================================================
         // 2. TX STATE @ 10Hz
@@ -418,22 +298,16 @@ void Task_SerialComm(void* pvParam) {
         //   tx_state = STATE frame queued vào ring buffer.
         //   tx_probe = probe frame queued (bootstrap, chưa xác nhận host).
         //   tx_drop  = slot/frame bị bỏ (offline, NaN, buffer full).
-        //   Host delivery chỉ xác nhận bởi drain activity hoặc RX.
+        //   Host delivery chỉ xác nhận bởi drain activity.
         //   Protocol V2 không có per-frame ACK.
         // ========================================================
-        stateDivider++;
-        if (stateDivider >= 5) {  // 20ms * 5 = 100ms = 10Hz
-            stateDivider = 0;
+        txSched.tick();
+        if (txSched.state_due) {
 
-            // Probe được tiêu thụ tại STATE TX slot
-            bool consuming_probe = false;
-            if (!g_lastHostConnected && s_probe_pending) {
-                consuming_probe = true;
-                s_probe_pending = false;
-            }
-            bool allow_tx_state = g_lastHostConnected || consuming_probe;
+            bool allow_tx_state = (sm.state == SessionState::ONLINE);
+            bool need_probe = (sm.state == SessionState::PROBING && sm.tx_count == 0 && (now - s_last_probe_ms >= 500));
 
-            if (!allow_tx_state) {
+            if (!allow_tx_state && !need_probe) {
                 g_telemetry.tx_drop++;
             } else {
                 OdometryData_t odom;
@@ -460,12 +334,17 @@ void Task_SerialComm(void* pvParam) {
 
                     if (plen > 0 && (size_t)plen < sizeof(g_payloadBuf)) {
                         // Queue với deadline 100ms
-                        if (enqueueFrame(g_payloadBuf, consuming_probe ? 3 : 1, now + 100)) {
-                            if (consuming_probe) {
-                                s_probe_outstanding = true;
+                        if (need_probe) {
+                            if (sm.enqueue_probe(
+                                    g_payloadBuf, now + 100,
+                                    &s_usb_tx_event_cnt, g_telemetry)) {
                                 s_last_probe_ms = now;
+                                g_txSeq++;
                             }
-                            g_txSeq++;
+                        } else {
+                            if (sm.enqueue(g_payloadBuf, 1, now + 100, g_telemetry)) {
+                                g_txSeq++;
+                            }
                         }
                     } else {
                         g_telemetry.tx_drop++;
@@ -479,9 +358,7 @@ void Task_SerialComm(void* pvParam) {
         // [F2-3] Cùng g_txSeq chung.
         // [F2-6] Chỉ tăng tx_env khi TX_OK.
         // ========================================================
-        envDivider++;
-        if (envDivider >= 25) {  // 20ms * 25 = 500ms = 2Hz
-            envDivider = 0;
+        if (txSched.env_due) {
 
             if (!g_lastHostConnected) {
                 // [F2-L3-1] Host disconnected -> drop slot telemetry
@@ -516,7 +393,7 @@ void Task_SerialComm(void* pvParam) {
 
                     if (plen > 0 && (size_t)plen < sizeof(g_payloadBuf)) {
                         // ENV deadline 500ms
-                        if (enqueueFrame(g_payloadBuf, 2, now + 500)) {
+                        if (sm.enqueue(g_payloadBuf, 2, now + 500, g_telemetry)) {
                             g_txSeq++;
                         }
                     } else {
@@ -529,7 +406,7 @@ void Task_SerialComm(void* pvParam) {
                         (unsigned long)g_txSeq);
 
                     if (plen > 0 && (size_t)plen < sizeof(g_payloadBuf)) {
-                        if (enqueueFrame(g_payloadBuf, 2, now + 500)) {
+                        if (sm.enqueue(g_payloadBuf, 2, now + 500, g_telemetry)) {
                             g_txSeq++;
                         }
                     } else {
@@ -565,10 +442,10 @@ void Task_SerialComm(void* pvParam) {
                 g_telemetry.tx_completed, g_telemetry.tx_drop,
                 g_telemetry.tx_partial);
 
-            // Log TinyUSB CDC events
-            DBG.printf("  host: up=%d dtr=%d usb_evt=%lu probe_pend=%d probe_out=%d\n",
-                (int)g_lastHostConnected, (int)s_dtr_active, s_usb_event_cnt,
-                (int)s_probe_pending, (int)s_probe_outstanding);
+            // Log TinyUSB CDC events [F2-L26-5]
+            DBG.printf("  host: up=%d dtr=%d usb_evt=%lu tx_evt=%lu state=%d part=%lu arm=%d base=%lu\n",
+                (int)g_lastHostConnected, (int)s_dtr_active, s_usb_event_cnt, s_usb_tx_event_cnt,
+                (int)sm.state, sm.consecutive_partials, (int)sm.probe_armed, sm.probe_armed_tx_event_cnt);
 
             DBG.printf("  CMD: last=%lums ago=%lums\n",
                 g_telemetry.last_valid_cmd_ms, cmd_age_ms);

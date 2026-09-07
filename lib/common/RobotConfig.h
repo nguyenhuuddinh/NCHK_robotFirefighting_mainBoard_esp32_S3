@@ -43,7 +43,8 @@
 // K_FF:            PWM them moi rad/s tang them
 // Cong thuc: PWM = sign(omega) * (PWM_OFFSET + |omega| * K_FF)
 #define FF_PWM_OFFSET      140.0f  // Chinh o Buoc 1 (di thang)
-#define FF_PWM_OFFSET_TURN 140.0f  // Chinh o Buoc 1 (xoay)
+// Do tren xe that: PWM 149-155 khong thang ma sat xoay; nguong khoi dong ~180.
+#define FF_PWM_OFFSET_TURN 175.0f  // Xoay tai cho, giu rieng voi offset di thang
 #define FF_K_FF             1.5f   // Chinh o Buoc 2
 
 // ==========================================

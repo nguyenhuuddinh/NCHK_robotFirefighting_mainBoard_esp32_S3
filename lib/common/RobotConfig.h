@@ -124,6 +124,17 @@
 #define CMD_VEL_TIMEOUT_MS 1000  // Mat lenh > 1s -> EMERGENCY
 
 // ==========================================
+// OPTIONAL ESP32-WROOM UART BRIDGE
+// ==========================================
+// GPIO19/GPIO20 la USB D-/D+ cua ESP32-S3 va dang duoc native USB CDC dung
+// cho Raw Serial V2 noi voi Raspberry Pi. Vi vay khong duoc khoi tao Serial2
+// tren hai chan nay. Mac dinh co lap WROOM UART cho den khi duoc remap sang
+// cap GPIO an toan va kiem tra lai tren phan cung.
+#ifndef ENABLE_WROOM_UART
+#define ENABLE_WROOM_UART 0
+#endif
+
+// ==========================================
 // DEBUG SERIAL — Tach rieng debug log va serial transport
 // ==========================================
 // Serial  (USB CDC) → Raw Serial V2 transport (noi voi Raspberry Pi)

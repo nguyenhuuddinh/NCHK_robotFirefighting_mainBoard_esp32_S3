@@ -4,6 +4,12 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 
+#if ENABLE_WROOM_UART &&                                                   \
+    ((SLAVE_RX_PIN == 19) || (SLAVE_RX_PIN == 20) ||                       \
+     (SLAVE_TX_PIN == 19) || (SLAVE_TX_PIN == 20))
+#error "WROOM UART cannot use GPIO19/GPIO20 while native USB CDC is enabled"
+#endif
+
 // Instance toan cuc
 SlaveComm slaveComm;
 

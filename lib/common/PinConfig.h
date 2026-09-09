@@ -56,6 +56,8 @@
 // ==========================================
 // 5. UART (WROOM COMMUNICATION) PINS
 // ==========================================
+// LEGACY ONLY: GPIO19/GPIO20 trung voi native USB D-/D+ cua ESP32-S3.
+// ENABLE_WROOM_UART mac dinh bang 0. Phai remap ca hai chan truoc khi bat lai.
 #define SLAVE_RX_PIN 20
 #define SLAVE_TX_PIN 19
 

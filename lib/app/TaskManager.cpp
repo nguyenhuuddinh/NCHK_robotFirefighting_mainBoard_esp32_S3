@@ -64,12 +64,14 @@ void TaskManager_init() {
     );
 #endif
 
-    // Core 0: UART Rx/Tx voi WROOM
+    // Core 0: UART Rx/Tx voi WROOM (tuy chon)
+#if ENABLE_WROOM_UART
     xTaskCreatePinnedToCore(
         Task_UART, "Task_UART",
         TASK_UART_STACK, &g_ctx,
         TASK_UART_PRIORITY, nullptr, CORE_0
     );
+#endif
 
     // Core 0: Logger (Debug)
     xTaskCreatePinnedToCore(
@@ -82,6 +84,11 @@ void TaskManager_init() {
     DBG.printf("[CFG] Motion: Core%d Pri%d | Serial: Core%d Pri%d Stack%d\n",
                   CORE_1, TASK_MOTION_PRIORITY,
                   CORE_0, TASK_SERIALCOMM_PRIORITY, TASK_SERIALCOMM_STACK);
-    DBG.printf("[CFG] UART: Core%d Pri%d | Logger: Core%d Pri%d\n",
+#if ENABLE_WROOM_UART
+    DBG.printf("[CFG] WROOM UART: Core%d Pri%d | Logger: Core%d Pri%d\n",
                   CORE_0, TASK_UART_PRIORITY, CORE_0, TASK_LOGGER_PRIORITY);
+#else
+    DBG.printf("[CFG] WROOM UART: disabled | Logger: Core%d Pri%d\n",
+                  CORE_0, TASK_LOGGER_PRIORITY);
+#endif
 }

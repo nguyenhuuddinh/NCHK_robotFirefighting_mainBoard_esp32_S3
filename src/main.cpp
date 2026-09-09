@@ -5,13 +5,13 @@
  * Kiem truc FreeRTOS Multi-Task:
  *   Core 1: Task_Motion      (50Hz)  — Encoder, IMU, PID, PWM
  *   Core 0: Task_SerialComm  (50Hz)  — Raw Serial V2 (USB CDC -> Pi)
- *   Core 0: Task_UART        (20Hz)  — Giao tiep UART voi ESP32-WROOM
+ *   Core 0: Task_UART        (20Hz)  — Tuy chon; mac dinh co lap WROOM
  *   Core 0: Task_Logger      (5Hz)   — Debug Serial Monitor
  *
  * Serial ports:
  *   Serial  (USB CDC) → Raw Serial V2 transport (Raspberry Pi)
  *   Serial0 (UART0/CH340) → Debug log + Serial Monitor (Laptop)
- *   Serial2 (UART2) → Giao tiep WROOM
+ *   Serial2 (UART2) → Tuy chon; chi bat sau khi remap khoi GPIO19/20
  *
  * Legacy: Task_MicroROS source còn trong lib/app/ để rollback.
  *         micro_ros_platformio dependency giữ nguyên trong platformio.ini.
@@ -73,7 +73,11 @@ void setup() {
     } else {
         DBG.println("[WARN] MPU6050 Init Failed! Fallback to encoder-only.");
     }
+#if ENABLE_WROOM_UART
     slaveComm.init();
+#else
+    DBG.println("[CFG] WROOM UART disabled; GPIO19/GPIO20 reserved for native USB");
+#endif
 
     // 2. Khoi tao State Machine
     robotMaster.init();

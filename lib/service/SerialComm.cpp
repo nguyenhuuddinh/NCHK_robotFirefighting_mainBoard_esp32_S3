@@ -506,32 +506,24 @@ bool SerialParser::parseFrame_(const char* frame, size_t len,
 // ============================================================
 UsbRecoveryAction UsbRecoveryController::request(uint32_t now,
                                                  uint32_t detach_ms) {
-    const bool retry_due = retry_pending_
-        && (int32_t)(now - retry_not_before_ms_) >= 0;
-    if (active_ || (!recovery_armed_ && !retry_due)) {
+    if (active_ || !recovery_armed_) {
         return UsbRecoveryAction::NONE;
     }
 
     active_ = true;
     recovery_armed_ = false;
-    retry_pending_ = false;
     reconnect_deadline_ms_ = now + detach_ms;
     return UsbRecoveryAction::DETACH;
 }
 
-UsbRecoveryAction UsbRecoveryController::poll(uint32_t now,
-                                              uint32_t retry_ms) {
+UsbRecoveryAction UsbRecoveryController::poll(uint32_t now) {
     if (!active_ || (int32_t)(now - reconnect_deadline_ms_) < 0) {
         return UsbRecoveryAction::NONE;
     }
 
     active_ = false;
-    // A physical attach is only a request to the USB controller. If Linux
-    // never reopens the CDC session, no valid RX can re-arm the normal
-    // one-shot path. Permit another detach after a bounded enumeration grace;
-    // observeValidRx() cancels this retry as soon as the host is healthy.
-    retry_pending_ = true;
-    retry_not_before_ms_ = now + retry_ms;
+    // Physical recovery is intentionally one-shot. A new valid RX frame must
+    // prove that a new host session exists before another detach is allowed.
     return UsbRecoveryAction::ATTACH;
 }
 
@@ -555,14 +547,20 @@ void TxLivenessStateMachine::update(bool dtr, uint32_t current_tx_evt,
     if (valid_rx_activity) {
         state = SessionState::ONLINE;
         probe_armed = false;
-        if (consecutive_partials >= 3) {
+        if (dtr && consecutive_partials >= 3) {
             recovery_pending = true;
+            recovery_reason = SessionRecoveryReason::TX_STALLED;
         }
         return;
     }
 
     if (!dtr) {
-        recovery_pending = true;
+        // OFFLINE with DTR low is the normal no-host state. Only an existing
+        // session needs logical cleanup; it must never force USB re-enumeration.
+        if (state != SessionState::OFFLINE || tx_count > 0 || probe_armed) {
+            recovery_pending = true;
+            recovery_reason = SessionRecoveryReason::HOST_DISCONNECTED;
+        }
         return;
     }
 
@@ -582,7 +580,8 @@ void TxLivenessStateMachine::update(bool dtr, uint32_t current_tx_evt,
             break;
         case SessionState::ONLINE:
             if (consecutive_partials >= 3) {
-                recovery_pending = true; // [F2-L26-1] Caller must consume this and run cleanup
+                recovery_pending = true;
+                recovery_reason = SessionRecoveryReason::TX_STALLED;
             }
             break;
     }
@@ -675,6 +674,7 @@ void TxLivenessStateMachine::reset() {
     state = SessionState::OFFLINE;
     consecutive_partials = 0;
     recovery_pending = false;
+    recovery_reason = SessionRecoveryReason::NONE;
     probe_armed = false;
     last_tx_event_cnt = 0;
     tx_head = 0;

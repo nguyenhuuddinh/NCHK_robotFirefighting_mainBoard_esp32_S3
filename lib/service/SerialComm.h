@@ -203,6 +203,12 @@ enum class SessionState {
     ONLINE
 };
 
+enum class SessionRecoveryReason {
+    NONE,
+    HOST_DISCONNECTED,
+    TX_STALLED
+};
+
 enum class UsbRecoveryAction {
     NONE,
     DETACH,
@@ -212,23 +218,20 @@ enum class UsbRecoveryAction {
 class UsbRecoveryController {
 public:
     UsbRecoveryAction request(uint32_t now, uint32_t detach_ms = 1000);
-    UsbRecoveryAction poll(uint32_t now, uint32_t retry_ms = 3000);
+    UsbRecoveryAction poll(uint32_t now);
     bool observeValidRx() {
         const bool changed = !recovery_armed_;
         recovery_armed_ = true;
-        retry_pending_ = false;
         return changed;
     }
+    void observeHostDisconnect() { recovery_armed_ = false; }
     bool active() const { return active_; }
     bool armed() const { return recovery_armed_; }
-    bool retryPending() const { return retry_pending_; }
 
 private:
     bool active_ = false;
     bool recovery_armed_ = false;
-    bool retry_pending_ = false;
     uint32_t reconnect_deadline_ms_ = 0;
-    uint32_t retry_not_before_ms_ = 0;
 };
 
 struct TxSlot {
@@ -257,6 +260,7 @@ public:
 
     // Transition flags
     bool recovery_pending = false;
+    SessionRecoveryReason recovery_reason = SessionRecoveryReason::NONE;
 
     void update(bool dtr, uint32_t current_tx_evt,
                 bool valid_rx_activity = false);

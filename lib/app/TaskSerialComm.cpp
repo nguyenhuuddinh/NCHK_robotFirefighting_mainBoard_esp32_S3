@@ -218,9 +218,14 @@ void Task_SerialComm(void* pvParam) {
             s_discarding = true;
         };
 
+        auto cleanup_disconnected_session = [&]() {
+            usbRecovery.observeHostDisconnect();
+            cleanup_session();
+        };
+
         // (a) Checkpoint trước read
         if (s_disconnect_epoch != s_last_disconnect_epoch) {
-            cleanup_session();
+            cleanup_disconnected_session();
         }
 
         // ========================================================
@@ -232,7 +237,7 @@ void Task_SerialComm(void* pvParam) {
 
         while (Serial.available() > 0 && rxBudget > 0) {
             if (s_disconnect_epoch != s_last_disconnect_epoch) {
-                cleanup_session();
+                cleanup_disconnected_session();
             }
 
             int b = Serial.read();
@@ -243,7 +248,7 @@ void Task_SerialComm(void* pvParam) {
 
             // (b) Checkpoint ngay sau Serial.read và trước g_parser.feed
             if (s_disconnect_epoch != s_last_disconnect_epoch) {
-                cleanup_session();
+                cleanup_disconnected_session();
             }
 
             if (s_discarding) {
@@ -255,7 +260,7 @@ void Task_SerialComm(void* pvParam) {
             if (g_parser.feed((uint8_t)b, rx, g_telemetry)) {
                 // (c) Checkpoint sau feed nhưng trước handleRxFrame
                 if (s_disconnect_epoch != s_last_disconnect_epoch) {
-                    cleanup_session();
+                    cleanup_disconnected_session();
                     continue;
                 }
                 valid_rx_activity = true;
@@ -270,7 +275,7 @@ void Task_SerialComm(void* pvParam) {
 
         // (d) Checkpoint sau RX loop trước clear-discard/hostNow/TX
         if (s_disconnect_epoch != s_last_disconnect_epoch) {
-            cleanup_session();
+            cleanup_disconnected_session();
         }
 
         // Khi queue rỗng trong quá trình discard, clear discard_mode và reset parser lần cuối
@@ -290,23 +295,25 @@ void Task_SerialComm(void* pvParam) {
                 s_dtr_active, s_usb_tx_event_cnt, valid_rx_activity);
         }
 
-        // [F2-L26-1] Nếu state machine yêu cầu recovery (DTR drop hoặc >= 3 TX stall),
-        // phải cleanup ngay để xóa stale queue/parser trước khi caller cho nó quay lại PROBING
+        // DTR drop chỉ đóng session logic. Chỉ TX stall khi host còn active
+        // mới được phép thực hiện physical USB detach/attach một lần.
         if (sm.recovery_pending) {
-            if (g_lastHostConnected) {
-                DBG.println("[SERIAL] USB host disconnected or stalled -> Recovery");
+            const SessionRecoveryReason recoveryReason = sm.recovery_reason;
+            if (recoveryReason == SessionRecoveryReason::HOST_DISCONNECTED) {
+                if (g_lastHostConnected) {
+                    DBG.println("[SERIAL] USB host disconnected -> Offline");
+                }
+                usbRecovery.observeHostDisconnect();
+            } else if (recoveryReason == SessionRecoveryReason::TX_STALLED) {
+                DBG.println("[SERIAL] USB CDC TX stalled -> Recovery");
             }
             cleanup_session(); // resets sm internally, clears recovery_pending
 
-            // A software queue reset cannot release a TinyUSB endpoint whose
-            // host stopped draining data. Clear both CDC streams, then force
-            // a short USB detach so Linux aborts pending URBs and reopens a
-            // fresh endpoint. The controller makes this one-shot and
-            // non-blocking; motor/watchdog tasks continue running.
-            // DTR may fall before this task observes a wedged TX endpoint.
-            // UsbRecoveryController's valid-RX arm is the liveness proof; do
-            // not require the current line state or the detach can be skipped.
-            if (usbRecovery.request(now) == UsbRecoveryAction::DETACH) {
+            // Physical recovery is reserved for a confirmed TX stall. A normal
+            // host close must leave the USB device attached and passively wait
+            // for the next DTR/RX session instead of creating an xHCI storm.
+            if (recoveryReason == SessionRecoveryReason::TX_STALLED &&
+                usbRecovery.request(now) == UsbRecoveryAction::DETACH) {
                 DBG.println("[SERIAL] USB CDC stalled -> soft reconnect");
                 tud_cdc_n_write_clear(0);
                 tud_cdc_n_read_flush(0);

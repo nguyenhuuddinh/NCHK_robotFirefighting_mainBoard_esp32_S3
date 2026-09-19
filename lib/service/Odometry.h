@@ -14,7 +14,9 @@ public:
     // - wz_encoder: Vận tốc góc từ Encoder (rad/s)
     // - gyro_z: Vận tốc góc từ IMU (rad/s)
     // - dt: thời gian trôi qua (giây)
-    void update(float v_x, float wz_encoder, float gyro_z, float dt);
+    // - stationary: da xac nhan robot dung co chu dich va encoder im
+    void update(float v_x, float wz_encoder, float gyro_z, float dt,
+                bool stationary = false);
     
     OdometryData_t getOdometry();
     

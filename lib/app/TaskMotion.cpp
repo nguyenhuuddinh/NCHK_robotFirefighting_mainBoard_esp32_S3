@@ -4,6 +4,7 @@
 #include "Kinematics.h"
 #include "MotionControl.h"
 #include "MotorDriver.h"
+#include "MotionStationaryGate.h"
 #include "Odometry.h"
 #include "PIDController.h"
 #include "RobotConfig.h"
@@ -32,6 +33,9 @@ void Task_Motion(void *pvParam) {
   // Trang thai Ramp
   float ramp_vx = 0.0f;
   float ramp_wz = 0.0f;
+  MotionStationaryGate stationary_gate(ODOM_STATIONARY_CONFIRM_CYCLES,
+                                       ODOM_STATIONARY_CMD_EPS,
+                                       ODOM_STATIONARY_RAMP_EPS);
 
   for (;;) {
     vTaskDelayUntil(&xLastWakeTime, xPeriod);
@@ -45,10 +49,14 @@ void Task_Motion(void *pvParam) {
     int64_t curr_rr = encoderDriver.getCountRR();
 
     const float ticks2rads = (TWO_PI / (float)ENCODER_TICKS_PER_REV) / dt;
-    float w_fl = (curr_fl - prev_fl) * ticks2rads;
-    float w_rl = (curr_rl - prev_rl) * ticks2rads;
-    float w_fr = (curr_fr - prev_fr) * ticks2rads;
-    float w_rr = (curr_rr - prev_rr) * ticks2rads;
+    const int64_t delta_fl = curr_fl - prev_fl;
+    const int64_t delta_rl = curr_rl - prev_rl;
+    const int64_t delta_fr = curr_fr - prev_fr;
+    const int64_t delta_rr = curr_rr - prev_rr;
+    float w_fl = delta_fl * ticks2rads;
+    float w_rl = delta_rl * ticks2rads;
+    float w_fr = delta_fr * ticks2rads;
+    float w_rr = delta_rr * ticks2rads;
     prev_fl = curr_fl;
     prev_rl = curr_rl;
     prev_fr = curr_fr;
@@ -60,12 +68,6 @@ void Task_Motion(void *pvParam) {
     float v_x = (v_left + v_right) / 2.0f;
     float wz_encoder = (v_right - v_left) / TRACK_WIDTH_M;
 
-    odometry.update(v_x, wz_encoder, gyro_z, dt);
-    float current_theta = odometry.getOdometry().yaw;
-    float current_x = odometry.getOdometry().x;
-    float current_y = odometry.getOdometry().y;
-    float current_alpha = odometry.getLastAlpha();
-
     // ========================================================
     // 2. DOC LENH DIEU KHIEN (Mutex protected)
     //    Slave chi nhan (vx, wz) tu micro-ROS /cmd_vel hoac Web
@@ -76,10 +78,21 @@ void Task_Motion(void *pvParam) {
     cmd_wz = ctx->cmdVel.target_wz;
     xSemaphoreGive(ctx->cmdMutex);
 
+    const bool motion_allowed = robotMaster.isMotionAllowed();
+    const bool odom_stationary = stationary_gate.update(
+        motion_allowed, cmd_vx, cmd_wz, ramp_vx, ramp_wz, delta_fl, delta_rl,
+        delta_fr, delta_rr);
+
+    odometry.update(v_x, wz_encoder, gyro_z, dt, odom_stationary);
+    float current_theta = odometry.getOdometry().yaw;
+    float current_x = odometry.getOdometry().x;
+    float current_y = odometry.getOdometry().y;
+    float current_alpha = odometry.getLastAlpha();
+
     // ========================================================
     // 4. KIEM TRA STATE MACHINE
     // ========================================================
-    if (!robotMaster.isMotionAllowed()) {
+    if (!motion_allowed) {
       // STATE_IDLE hoac STATE_EMERGENCY -> dung motor
       motorDriver.stopAll();
       pidFL.reset();

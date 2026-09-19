@@ -1,5 +1,6 @@
 #include "Odometry.h"
 #include "../common/RobotConfig.h"
+#include "OdometryFusion.h"
 
 Odometry odometry;
 
@@ -14,7 +15,8 @@ void Odometry::init() {
   last_alpha = COMP_ALPHA_LOW;
 }
 
-void Odometry::update(float v_x, float wz_encoder, float gyro_z, float dt) {
+void Odometry::update(float v_x, float wz_encoder, float gyro_z, float dt,
+                      bool stationary) {
   if (dt <= 0.0f)
     return;
 
@@ -24,15 +26,12 @@ void Odometry::update(float v_x, float wz_encoder, float gyro_z, float dt) {
   //   vi encoder bi truot ngang o co cau skid-steer
   // - Khi di thang: alpha THAP → blend deu gyro + encoder
   // ========================================
-  float alpha;
-  if (fabsf(gyro_z) > COMP_GYRO_THRESHOLD) {
-    alpha = COMP_ALPHA_HIGH;  // 0.995 — tin gyro khi xoay
-  } else {
-    alpha = COMP_ALPHA_LOW;   // 0.95  — blend deu khi thang
-  }
-  last_alpha = alpha;
-
-  float fused_wz = alpha * gyro_z + (1.0f - alpha) * wz_encoder;
+  const AngularFusionResult fusion =
+      fuseAngularVelocity(wz_encoder, gyro_z, stationary,
+                          COMP_GYRO_THRESHOLD, COMP_ALPHA_HIGH,
+                          COMP_ALPHA_LOW);
+  last_alpha = fusion.alpha;
+  const float fused_wz = fusion.angular_velocity;
 
   // ========================================
   // Tich phan vi tri bang Runge-Kutta bac 2 (Mid-point)

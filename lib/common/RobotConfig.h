@@ -5,8 +5,12 @@
 // ROBOT PHYSICAL PARAMETERS (SKID-STEER)
 // ==========================================
 #define WHEEL_RADIUS_M 0.034 // Ban kinh banh xe (m) (Duong kinh 68mm)
-#define WHEEL_BASE_M 0.134   // Khoang cach giua 2 banh truoc - sau (m)
-#define TRACK_WIDTH_M 0.086  // Khoang cach giua 2 banh trai - phai (m)
+// Do lai 2026-09-17: tam truc truoc-sau deu 135 mm o hai ben.
+#define WHEEL_BASE_M 0.135
+// Do lai 2026-09-17: outer-to-outer=200 mm, moi banh rong 27 mm
+// => track tam-tam = 200 - 27 = 173 mm. Day la seed co khi; effective track
+// cua skid-steer van phai xac nhan bang bai quay CW/CCW co UART + ground truth.
+#define TRACK_WIDTH_M 0.173
 
 // ==========================================
 // ENCODER PARAMETERS
@@ -30,6 +34,9 @@
 // Thay doi khi o Buoc 3 (KP) va Buoc 4 (KI)
 // Kd = 0: Encoder roi rac -> D khuyech dai nhieu, giu nguyen
 // ==========================================
+// A/B 2026-09-12: Kp=20 lam cac banh chong nhau khi xoay skid-steer; du PWM
+// da tang toi 204/255, banh FL/RR van ket va yaw trai giam tu 37.3 xuong 14.8
+// do trong 3 giay. Giu Kp=10 de tranh vong P day qua manh tren san co ma sat.
 #define PID_KP 10.0
 #define PID_KI 0.3
 #define PID_KD 0.0
@@ -45,7 +52,12 @@
 #define FF_PWM_OFFSET      140.0f  // Chinh o Buoc 1 (di thang)
 // Do tren xe that: PWM 149-155 khong thang ma sat xoay; nguong khoi dong ~180.
 #define FF_PWM_OFFSET_TURN 175.0f  // Xoay tai cho, giu rieng voi offset di thang
-#define FF_K_FF             1.5f   // Chinh o Buoc 2
+// Goal phia sau 2026-09-12: o Vx=0.10 m/s, target banh ~2.94 rad/s nhung
+// encoder chi bam 18-43% target voi K_FF=1.5 (PWM trung binh 162-172).
+// A/B tren xe that: K_FF=10.0 giup ca 4 banh khoi dong deu nhung toc do on dinh
+// dat 114-116% muc tieu o Vx=0.10 m/s. Ha ve 8.0 de giam vuot toc, van tao
+// them ~24 PWM tai 2.94 rad/s de thang ma sat tinh; giu nguyen offset va PID.
+#define FF_K_FF             8.0f   // Chinh o Buoc 2 (PWM moi rad/s)
 
 // ==========================================
 // COMPUTED TUNING VALUES (Tu dong tinh theo TUNING_STEP)
@@ -117,6 +129,13 @@
 #define COMP_ALPHA_HIGH      0.995f  // Khi xoay: tin gyro 99.5%
 #define COMP_ALPHA_LOW       0.95f   // Khi di thang: tin gyro 95%, encoder 5%
 #define COMP_GYRO_THRESHOLD  0.1f    // Nguong chuyen doi (rad/s)
+
+// Chi khoa tich phan yaw khi lenh + ramp da ve 0 va ca bon encoder khong doi
+// trong 10 chu ky Motion (10 x 20 ms = 200 ms). Khong dat deadband gyro toan
+// cuc vi deadband co the lam mat chuyen dong quay cham that.
+#define ODOM_STATIONARY_CONFIRM_CYCLES 10
+#define ODOM_STATIONARY_CMD_EPS         0.0001f
+#define ODOM_STATIONARY_RAMP_EPS        0.01f
 
 // ==========================================
 // WATCHDOG / SAFETY

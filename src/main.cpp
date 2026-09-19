@@ -60,7 +60,7 @@ void setup() {
     DBG.printf("[CFG] FF_offset=%.0f FF_offset_turn=%.0f K_ff=%.1f\n",
                   (float)FF_PWM_OFFSET, (float)FF_PWM_OFFSET_TURN,
                   (float)FF_K_FF_ACTIVE);
-    DBG.printf("[CFG] TICKS/REV=%d | R=%.3fm | TRACK=%.2fm\n",
+    DBG.printf("[CFG] TICKS/REV=%d | R=%.3fm | TRACK=%.3fm\n",
                   (int)ENCODER_TICKS_PER_REV, WHEEL_RADIUS_M, TRACK_WIDTH_M);
     DBG.println("[CFG] Serial=USB-CDC(V2) | Serial0=UART(Debug)");
 

@@ -15,7 +15,8 @@ public:
     
     float getPitch();
     float getRoll();
-    float getGyroZ(); // raw angular velocity
+    // True only when a complete, fresh I2C sample was read.
+    bool tryGetGyroZ(float& gyro_z);
 
 private:
     Adafruit_MPU6050 mpu;
@@ -26,7 +27,13 @@ private:
     float pitch_bias;
     float roll_bias;
     
-    void calibrateGyro();
+    struct RawSample {
+        int16_t accel_x, accel_y, accel_z;
+        int16_t gyro_x, gyro_y, gyro_z;
+    };
+    bool readRawSample(RawSample& sample);
+    bool calibrateGyro();
+    bool ready = false;
 };
 
 extern IMUDriver imuDriver;

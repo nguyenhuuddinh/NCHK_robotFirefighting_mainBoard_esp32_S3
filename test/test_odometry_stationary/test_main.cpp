@@ -76,6 +76,19 @@ void test_moving_fusion_keeps_existing_filter_behavior(void) {
   TEST_ASSERT_FLOAT_WITHIN(0.000001f, 0.2995f, high.angular_velocity);
 }
 
+void test_invalid_gyro_uses_encoder_only(void) {
+  const AngularFusionResult result =
+      fuseAngularVelocity(0.23f, -0.9f, false, 0.1f, 0.995f, 0.95f, false);
+  TEST_ASSERT_FLOAT_WITHIN(0.000001f, 0.23f, result.angular_velocity);
+  TEST_ASSERT_FLOAT_WITHIN(0.000001f, 0.0f, result.alpha);
+}
+
+void test_stationary_still_zero_when_gyro_invalid(void) {
+  const AngularFusionResult result =
+      fuseAngularVelocity(0.23f, -0.9f, true, 0.1f, 0.995f, 0.95f, false);
+  TEST_ASSERT_FLOAT_WITHIN(0.000001f, 0.0f, result.angular_velocity);
+}
+
 int main(int argc, char **argv) {
   UNITY_BEGIN();
   RUN_TEST(test_requires_consecutive_stationary_cycles);
@@ -84,5 +97,7 @@ int main(int argc, char **argv) {
   RUN_TEST(test_disabled_motion_still_requires_encoder_silence);
   RUN_TEST(test_stationary_fusion_rejects_gyro_bias);
   RUN_TEST(test_moving_fusion_keeps_existing_filter_behavior);
+  RUN_TEST(test_invalid_gyro_uses_encoder_only);
+  RUN_TEST(test_stationary_still_zero_when_gyro_invalid);
   return UNITY_END();
 }

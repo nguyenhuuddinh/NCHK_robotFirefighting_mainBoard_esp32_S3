@@ -15,8 +15,9 @@ public:
     // - gyro_z: Vận tốc góc từ IMU (rad/s)
     // - dt: thời gian trôi qua (giây)
     // - stationary: da xac nhan robot dung co chu dich va encoder im
+    // - gyro_valid: false means this cycle uses encoder-only yaw
     void update(float v_x, float wz_encoder, float gyro_z, float dt,
-                bool stationary = false);
+                bool stationary = false, bool gyro_valid = true);
     
     OdometryData_t getOdometry();
     

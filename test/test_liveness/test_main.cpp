@@ -1,6 +1,7 @@
 #include <unity.h>
 #include "../../lib/service/SerialComm.cpp"
 #include "SerialComm.h"
+#include "../../lib/service/PumpSafety.h"
 
 uint32_t s_usb_tx_event_cnt = 0;
 HardwareSerial Serial;
@@ -410,6 +411,55 @@ void test_tx_complete_event_clears_stall_evidence(void) {
     TEST_ASSERT_EQUAL(0, local_sm.last_tx_event_cnt);
 }
 
+void test_pump_requires_host_and_explicit_off_to_rearm(void) {
+    PumpSafety pump;
+    TEST_ASSERT_FALSE(pump.tick(0, true));
+    pump.request(true, 100);
+    TEST_ASSERT_FALSE(pump.tick(100, false));
+    TEST_ASSERT_TRUE(pump.lockedOff());
+    pump.request(true, 101);
+    TEST_ASSERT_FALSE(pump.tick(101, true));
+    pump.request(false, 102);
+    pump.request(true, 103);
+    TEST_ASSERT_TRUE(pump.tick(103, true));
+}
+
+void test_pump_lease_and_hard_run_cap(void) {
+    PumpSafety lease;
+    lease.request(true, 10);
+    TEST_ASSERT_TRUE(lease.tick(760, true));
+    TEST_ASSERT_FALSE(lease.tick(761, true));
+    lease.request(true, 762);
+    TEST_ASSERT_FALSE(lease.tick(762, true));
+
+    PumpSafety run;
+    run.request(true, 100);
+    for (uint32_t now = 200;
+         now < 100 + PumpSafety::kMaxRunMs; now += 100) {
+        run.request(true, now);
+        TEST_ASSERT_TRUE(run.tick(now, true));
+    }
+    run.request(true, 100 + PumpSafety::kMaxRunMs);
+    TEST_ASSERT_FALSE(run.tick(100 + PumpSafety::kMaxRunMs, true));
+    TEST_ASSERT_TRUE(run.lockedOff());
+}
+
+void test_pump_millis_wrap_does_not_extend_run(void) {
+    PumpSafety pump;
+    const uint32_t started_at = UINT32_MAX - 100;
+    pump.request(true, started_at);
+    for (uint32_t elapsed = 100;
+         elapsed < PumpSafety::kMaxRunMs; elapsed += 100) {
+        const uint32_t now = started_at + elapsed;
+        pump.request(true, now);
+        TEST_ASSERT_TRUE(pump.tick(now, true));
+    }
+    const uint32_t deadline = started_at + PumpSafety::kMaxRunMs;
+    pump.request(true, deadline);
+    TEST_ASSERT_FALSE(pump.tick(deadline, true));
+    TEST_ASSERT_TRUE(pump.lockedOff());
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_dtr_fall_and_cleanup_recovery);
@@ -434,5 +484,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_valid_rx_cannot_hide_three_tx_stalls);
     RUN_TEST(test_valid_rx_with_dtr_low_does_not_request_physical_recovery);
     RUN_TEST(test_tx_complete_event_clears_stall_evidence);
+    RUN_TEST(test_pump_requires_host_and_explicit_off_to_rearm);
+    RUN_TEST(test_pump_lease_and_hard_run_cap);
+    RUN_TEST(test_pump_millis_wrap_does_not_extend_run);
     return UNITY_END();
 }

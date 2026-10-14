@@ -62,7 +62,17 @@ void Task_Motion(void *pvParam) {
     prev_fr = curr_fr;
     prev_rr = curr_rr;
 
-    float gyro_z = imuDriver.getGyroZ();
+    // Never reuse a previous gyro sample: a stale nonzero rate would keep
+    // integrating yaw while the IMU/I2C bus is unavailable.
+    float gyro_z = 0.0f;
+    bool gyro_valid = false;
+    bool bus_contended = false;
+    if (xSemaphoreTake(ctx->i2cMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+      gyro_valid = imuDriver.tryGetGyroZ(gyro_z) && isfinite(gyro_z);
+      xSemaphoreGive(ctx->i2cMutex);
+    } else {
+      bus_contended = true;
+    }
     float v_left = (w_fl + w_rl) * 0.5f * WHEEL_RADIUS_M;
     float v_right = (w_fr + w_rr) * 0.5f * WHEEL_RADIUS_M;
     float v_x = (v_left + v_right) / 2.0f;
@@ -83,7 +93,7 @@ void Task_Motion(void *pvParam) {
         motion_allowed, cmd_vx, cmd_wz, ramp_vx, ramp_wz, delta_fl, delta_rl,
         delta_fr, delta_rr);
 
-    odometry.update(v_x, wz_encoder, gyro_z, dt, odom_stationary);
+    odometry.update(v_x, wz_encoder, gyro_z, dt, odom_stationary, gyro_valid);
     float current_theta = odometry.getOdometry().yaw;
     float current_x = odometry.getOdometry().x;
     float current_y = odometry.getOdometry().y;
@@ -104,6 +114,11 @@ void Task_Motion(void *pvParam) {
 
       // Van cap nhat state de Logger doc
       xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
+      ctx->imuValid = gyro_valid;
+      if (!gyro_valid) {
+        if (bus_contended) ++ctx->imuBusContentions;
+        else ++ctx->imuReadFailures;
+      }
       ctx->motionState = {0,
                           0,
                           0,
@@ -153,6 +168,11 @@ void Task_Motion(void *pvParam) {
       ramp_wz = 0.0f;
 
       xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
+      ctx->imuValid = gyro_valid;
+      if (!gyro_valid) {
+        if (bus_contended) ++ctx->imuBusContentions;
+        else ++ctx->imuReadFailures;
+      }
       ctx->motionState = {0,
                           0,
                           0,
@@ -200,6 +220,11 @@ void Task_Motion(void *pvParam) {
     // 8. CAP NHAT TRANG THAI CHO LOGGER
     // ========================================================
     xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
+    ctx->imuValid = gyro_valid;
+    if (!gyro_valid) {
+      if (bus_contended) ++ctx->imuBusContentions;
+      else ++ctx->imuReadFailures;
+    }
     ctx->motionState = {w_fl,     w_rl,          w_fr,      w_rr,     tgt.v_fl,
                         tgt.v_rl, tgt.v_fr,      tgt.v_rr,  pwm_fl,   pwm_rl,
                         pwm_fr,   pwm_rr,        curr_fl,   curr_rl,  curr_fr,

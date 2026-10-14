@@ -13,8 +13,10 @@ void TaskManager_init() {
     // 1. Tao Mutex TRUOC khi bat ky Task nao chay
     g_ctx.cmdMutex = xSemaphoreCreateMutex();
     g_ctx.stateMutex = xSemaphoreCreateMutex();
+    g_ctx.i2cMutex = xSemaphoreCreateMutex();
 
-    if (g_ctx.cmdMutex == nullptr || g_ctx.stateMutex == nullptr) {
+    if (g_ctx.cmdMutex == nullptr || g_ctx.stateMutex == nullptr ||
+        g_ctx.i2cMutex == nullptr) {
         DBG.println("[ERROR] Failed to create Mutex! System halted.");
         while (true) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     }
@@ -33,8 +35,14 @@ void TaskManager_init() {
     // 3. Khoi tao gia tri mac dinh
     g_ctx.cmdVel = {};
     g_ctx.motionState = {};
+    g_ctx.imuValid = false;
+    g_ctx.imuReadFailures = 0;
+    g_ctx.imuBusContentions = 0;
     g_ctx.lastSensorData = {};
     g_ctx.sensorDataValid = false;
+    g_ctx.irRaw[0] = g_ctx.irRaw[1] = g_ctx.irRaw[2] = 0;
+    g_ctx.irSampleMs = 0;
+    g_ctx.irValid = false;
 
     // 4. Tao cac FreeRTOS Task
     // Core 1: Motion (Real-time, Priority cao nhat)
@@ -51,6 +59,12 @@ void TaskManager_init() {
         Task_SerialComm, "Task_Serial",
         TASK_SERIALCOMM_STACK, &g_ctx,
         TASK_SERIALCOMM_PRIORITY, nullptr, CORE_0
+    );
+
+    // Chỉ đọc ADC trên Core 0. Không tạo lệnh chuyển động/chấp hành.
+    xTaskCreatePinnedToCore(
+        Task_IrAdc, "Task_IrAdc",
+        3072, &g_ctx, 2, nullptr, CORE_0
     );
 
     // [Finding 3 FIX] Core 0: Web Server (Fallback)

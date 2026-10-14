@@ -13,9 +13,23 @@ void Task_Logger(void* pvParam) {
 
         // Doc trang thai motion
         MotionState_t s;
+        bool imu_valid;
+        uint32_t imu_read_failures, imu_bus_contentions;
         xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
         s = ctx->motionState;
+        imu_valid = ctx->imuValid;
+        imu_read_failures = ctx->imuReadFailures;
+        imu_bus_contentions = ctx->imuBusContentions;
         xSemaphoreGive(ctx->stateMutex);
+
+        static uint32_t last_imu_report_ms = 0;
+        const uint32_t now_ms = millis();
+        if (now_ms - last_imu_report_ms >= 5000) {
+            last_imu_report_ms = now_ms;
+            DBG.printf("[IMU-QA] valid=%d read_fail=%lu bus_busy=%lu\n",
+                       (int)imu_valid, (unsigned long)imu_read_failures,
+                       (unsigned long)imu_bus_contentions);
+        }
 
         // Doc lenh dieu khien
         float vx, wz;

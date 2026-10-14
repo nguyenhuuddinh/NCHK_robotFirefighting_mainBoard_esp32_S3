@@ -13,6 +13,7 @@ struct SharedContext {
     // --- Mutex ---
     SemaphoreHandle_t cmdMutex;    // Bao ve cmdVel
     SemaphoreHandle_t stateMutex;  // Bao ve motionState
+    SemaphoreHandle_t i2cMutex;    // Chia se Wire giua IMU va ADS1115
 
     // --- Queue ---
     QueueHandle_t sensorQueue;     // SensorPacket_t tu WROOM (xQueueOverwrite)
@@ -24,10 +25,18 @@ struct SharedContext {
     // --- Trang thai motion (Core1 ghi, Core0 doc) ---
     MotionState_t motionState;
     OdometryData_t odom;
+    bool imuValid;                // Fresh checked gyro read in latest motion cycle
+    uint32_t imuReadFailures;     // Cumulative I2C errors (after acquiring bus)
+    uint32_t imuBusContentions;   // Cumulative 2ms mutex acquisition failures
 
     // --- Du lieu cam bien moi nhat (doc boi Logger/MicroROS) ---
     SensorPacket_t lastSensorData;
     bool sensorDataValid;          // true khi da nhan duoc it nhat 1 packet
+
+    // Read-only IR analog telemetry; never controls motors or actuators.
+    uint16_t irRaw[3];            // left, center, right; ADS1115 counts
+    uint32_t irSampleMs;
+    bool irValid;
 };
 
 // ============================================================
@@ -45,6 +54,9 @@ void Task_SerialComm(void* pvParam);
 
 /** Task in debug log (Core 0, Priority thap) */
 void Task_Logger(void* pvParam);
+
+/** Task ADS1115 3-channel analog sampler (Core 0, low priority). */
+void Task_IrAdc(void* pvParam);
 
 // Bat macro nay neu can fallback Web Server de test motor nhanh (tat di de uu tien micro-ROS)
 // #define ENABLE_WEB_FALLBACK

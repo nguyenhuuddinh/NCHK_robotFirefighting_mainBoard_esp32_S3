@@ -10,11 +10,16 @@ struct AngularFusionResult {
 
 inline AngularFusionResult
 fuseAngularVelocity(float wz_encoder, float gyro_z, bool stationary,
-                    float gyro_threshold, float alpha_high, float alpha_low) {
+                    float gyro_threshold, float alpha_high, float alpha_low,
+                    bool gyro_valid = true) {
   if (stationary) {
     // Khong tich phan gyro bias khi robot da dung co chu dich va encoder im.
     return {0.0f, 0.0f};
   }
+
+  // Missing IMU data must never reuse a previous gyro sample. Encoder-only
+  // yaw is less accurate on skid-steer, but remains bounded by wheel motion.
+  if (!gyro_valid) return {wz_encoder, 0.0f};
 
   const float alpha =
       fabsf(gyro_z) > gyro_threshold ? alpha_high : alpha_low;

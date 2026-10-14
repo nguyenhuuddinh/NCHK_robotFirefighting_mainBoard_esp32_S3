@@ -13,6 +13,7 @@
  * TX (ESP32 -> Pi):
  *   STATE,2,seq,esp_ms,x,y,yaw,vx,wz,gyro_z  @ 10Hz
  *   ENV,2,seq,fire_flags,gas_ppm,temp_c,batt_v,valid  @ 2Hz
+ *   ACT,2,seq,esp_ms,pump_pwm,servo_phase,angle,servo_pwm,home_count,pump_ready @ 2Hz best effort
  *
  * RX (Pi -> ESP32):
  *   CMD,2,seq,vx,wz

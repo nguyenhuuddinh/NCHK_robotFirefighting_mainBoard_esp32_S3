@@ -16,7 +16,7 @@ void Odometry::init() {
 }
 
 void Odometry::update(float v_x, float wz_encoder, float gyro_z, float dt,
-                      bool stationary) {
+                      bool stationary, bool gyro_valid) {
   if (dt <= 0.0f)
     return;
 
@@ -29,7 +29,7 @@ void Odometry::update(float v_x, float wz_encoder, float gyro_z, float dt,
   const AngularFusionResult fusion =
       fuseAngularVelocity(wz_encoder, gyro_z, stationary,
                           COMP_GYRO_THRESHOLD, COMP_ALPHA_HIGH,
-                          COMP_ALPHA_LOW);
+                          COMP_ALPHA_LOW, gyro_valid);
   last_alpha = fusion.alpha;
   const float fused_wz = fusion.angular_velocity;
 

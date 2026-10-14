@@ -50,8 +50,9 @@
 // K_FF:            PWM them moi rad/s tang them
 // Cong thuc: PWM = sign(omega) * (PWM_OFFSET + |omega| * K_FF)
 #define FF_PWM_OFFSET      140.0f  // Chinh o Buoc 1 (di thang)
-// Do tren xe that: PWM 149-155 khong thang ma sat xoay; nguong khoi dong ~180.
-#define FF_PWM_OFFSET_TURN 175.0f  // Xoay tai cho, giu rieng voi offset di thang
+// Truoc day: PWM 149-155 khong thang ma sat xoay, nguong khoi dong ~180.
+// Thu 160 voi pin hien tai (2026-10-01); can kiem tra lai khi xe cho them nuoc.
+#define FF_PWM_OFFSET_TURN 160.0f  // Xoay tai cho, giu rieng voi offset di thang
 // Goal phia sau 2026-09-12: o Vx=0.10 m/s, target banh ~2.94 rad/s nhung
 // encoder chi bam 18-43% target voi K_FF=1.5 (PWM trung binh 162-172).
 // A/B tren xe that: K_FF=10.0 giup ca 4 banh khoi dong deu nhung toc do on dinh

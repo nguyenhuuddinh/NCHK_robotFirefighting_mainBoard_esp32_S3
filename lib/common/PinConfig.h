@@ -48,10 +48,10 @@
 #define I2C_SDA_PIN 2
 
 // ==========================================
-// 4. ACTUATOR PINS (Da chuyen sang WROOM)
+// 4. ACTUATOR PINS (ESP32-S3; WROOM retired)
 // ==========================================
-// Servo Pan/Tilt da chuyen sang ESP32-WROOM dieu khien qua UART
-// GPIO 3, 46 con trong — du phong tuong lai
+#define PUMP_PWM_PIN 47   // TB6612FNG PWMA, AIN1=3V3, AIN2=GND, STBY=3V3
+#define SERVO_SIGNAL_PIN 38 // SG90 nozzle signal; sweep configured in ServoConfig.h
 
 // ==========================================
 // 5. UART (WROOM COMMUNICATION) PINS

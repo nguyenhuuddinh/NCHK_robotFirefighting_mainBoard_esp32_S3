@@ -7,12 +7,14 @@
  *
  * TX (ESP32 -> Pi):
  *   STATE @ 10Hz (mỗi 100ms): odom + motion data
- *   ENV   @ 2Hz  (mỗi 500ms): sensor data từ WROOM
+ *   ENV   @ 2Hz  (mỗi 500ms): legacy WROOM slot; disabled in S3-only build
+ *   IR    @ 5Hz  (mỗi 200ms): ADS1115 raw, read-only
+ *   ACT   @ 2Hz  (best effort): commanded actuator state, not physical feedback
  *
  * RX (Pi -> ESP32):
  *   CMD:  cập nhật cmdVel + notify watchdog (duplicate bị bỏ qua)
- *   FIRE: cập nhật servo pan qua actuatorQueue
- *   PUMP: cập nhật pump on/off qua actuatorQueue
+ *   FIRE: legacy servo-pan queue; GPIO38 not actuated in this phase
+ *   PUMP: GPIO47 pump PWM through a bounded, host/robot-watchdog gate
  *
  * Protocol: @PAYLOAD*CCCC\n (CRC16-CCITT-FALSE)
  * Transport: Serial USB CDC native
@@ -24,6 +26,13 @@
 #include "SerialComm.h"
 #include "RobotConfig.h"
 #include "RobotMaster.h"
+#include "PumpOutput.h"
+#include "PumpSafety.h"
+#include "ServoConfig.h"
+#if SERVO_SWEEP_ENABLED
+#include "ServoOutput.h"
+#include "ServoSweep.h"
+#endif
 #include <Arduino.h>
 #include <math.h>
 #include <soc/usb_wrap_struct.h>
@@ -67,7 +76,7 @@ static void usb_event_cb(void* arg, esp_event_base_t event_base, int32_t event_i
 
 
 
-// [F2-3] TX sequence counter CHUNG cho cả STATE và ENV
+// [F2-3] TX sequence counter CHUNG cho STATE, ENV, IR, ACT
 // Mỗi hướng truyền có MỘT bộ đếm. Tăng sau mỗi frame được tạo.
 static uint32_t g_txSeq = 0;
 
@@ -75,6 +84,15 @@ static uint32_t g_txSeq = 0;
 static uint8_t s_servo_pan = 90;
 static uint8_t s_pump_on   = 0;
 static uint8_t s_buzzer_on = 0;
+static PumpSafety s_pump_safety;
+#if SERVO_SWEEP_ENABLED
+static ServoSweep s_servo_sweep(SERVO_SWEEP_START_DEG, SERVO_SWEEP_TURN_DEG,
+                                SERVO_SWEEP_END_DEG, SERVO_SWEEP_STEP_PERIOD_MS);
+static bool s_servo_fault = false;
+static uint32_t s_home_completion_count = 0;
+// Updated only from validated CMD frames on this same Core-0 task.
+static bool s_drive_command_zero = false;
+#endif
 
 // TX buffer tĩnh — không malloc
 static char g_payloadBuf[SERIAL_BUFFER_SIZE];
@@ -99,6 +117,10 @@ static void handleRxFrame(const SerialRxResult& rx, SharedContext* ctx) {
     switch (rx.type) {
 
     case RX_CMD: {
+#if SERVO_SWEEP_ENABLED
+        s_drive_command_zero = isfinite(rx.f1) && isfinite(rx.f2) &&
+                               fabsf(rx.f1) < 0.001f && fabsf(rx.f2) < 0.001f;
+#endif
         // CMD: cập nhật cmdVel dưới cmdMutex và notify watchdog
         xSemaphoreTake(ctx->cmdMutex, portMAX_DELAY);
         ctx->cmdVel.target_vx = rx.f1;
@@ -129,8 +151,9 @@ static void handleRxFrame(const SerialRxResult& rx, SharedContext* ctx) {
     }
 
     case RX_PUMP: {
-        // PUMP: on/off
+        // Direct ESP32-S3 pump owner. The old WROOM queue is not a live output.
         s_pump_on = rx.pump;
+        s_pump_safety.request(s_pump_on != 0, millis());
         DBG.printf("[ACT] Pump %s\n", s_pump_on ? "ON" : "OFF");
 
         // xQueueOverwrite: đảm bảo pump OFF không bao giờ bị drop
@@ -166,6 +189,10 @@ void Task_SerialComm(void* pvParam) {
     uint32_t lastTelemetryMs = millis();
 
     TickType_t xLastWake = xTaskGetTickCount();
+    // Phase IR two ticks (40ms) after STATE, allowing its USB frame to drain.
+    uint8_t irDivider = 8;
+    // Offset ACT away from the 100 ms STATE slots. Lower priority than IR.
+    uint8_t actDivider = 18;
 
     // ========================================================
     // [F2-L13-1] Đăng ký TinyUSB CDC event callback 1 lần
@@ -188,7 +215,7 @@ void Task_SerialComm(void* pvParam) {
         // ========================================================
         // 0.5 [F2-L9-1] USB CDC Bootstrap & Reconnect Detection
         // ========================================================
-        uint32_t now = millis();
+        const uint32_t pre_rx_ms = millis();
 
         // 1. Khai báo các trạng thái liveness/probe tĩnh
         static TxLivenessStateMachine sm;
@@ -200,7 +227,7 @@ void Task_SerialComm(void* pvParam) {
 
         bool fast_disconnect = false;
 
-        if (usbRecovery.poll(now) == UsbRecoveryAction::ATTACH) {
+        if (usbRecovery.poll(pre_rx_ms) == UsbRecoveryAction::ATTACH) {
             DBG.println("[SERIAL] USB CDC recovery reconnect");
             USB_WRAP.otg_conf.pad_enable = true;
             if (!tud_connect()) {
@@ -284,6 +311,11 @@ void Task_SerialComm(void* pvParam) {
             g_parser.reset();
         }
 
+        // RX_PUMP timestamps its lease with millis() inside handleRxFrame.
+        // Sample again after RX so PumpSafety::tick never sees a time earlier
+        // than the latest request and falsely latches LEASE_EXPIRED.
+        uint32_t now = millis();
+
         // ========================================================
         // 2. Tính/Recompute hostNow TỪ LIVENESS STATE MACHINE
         // ========================================================
@@ -336,6 +368,67 @@ void Task_SerialComm(void* pvParam) {
 
         bool hostNow = (sm.state == SessionState::ONLINE);
 
+        // Hard lease + continuous-run cap are independent of the ROS client.
+        // Even if the Pi repeats stale PUMP=1, the pump cannot run indefinitely.
+        // The motor command watchdog is an actuator interlock as well: a
+        // disconnected or EMERGENCY/IDLE robot cannot keep spraying.
+        const bool actuator_link_ok = hostNow && robotMaster.isMotionAllowed();
+        const bool pump_request_allowed = s_pump_safety.tick(now, actuator_link_ok);
+#if SERVO_SWEEP_ENABLED
+        const bool safe_to_home = actuator_link_ok && s_drive_command_zero;
+        if (s_servo_sweep.returningHome() && !safe_to_home) {
+            s_servo_sweep.abort();
+            servoOutput.stop();
+            DBG.println("[ERROR][SERVO] Home interrupted; pump locked until reboot.");
+        }
+        // Return only after the full sweep, intentional OFF or the bounded
+        // run cap. Lease expiry and link/watchdog loss remain fail-closed.
+        if (s_servo_sweep.active() && !pump_request_allowed) {
+            const bool normal_stop = !s_pump_on ||
+                s_pump_safety.stopReason() == PumpSafety::StopReason::MAX_RUN;
+            if (normal_stop && safe_to_home && s_servo_sweep.beginReturn(now)) {
+                DBG.println("[SERVO] Pump OFF; returning nozzle to 90 deg.");
+            } else {
+                s_servo_sweep.abort();
+                servoOutput.stop();
+                DBG.println("[ERROR][SERVO] Sweep interrupted; pump locked until reboot.");
+            }
+        }
+        // Re-arm requires physical settling at 90 and an observed PUMP=0.
+        // A held PUMP=1 cannot trigger another cycle after the 5 s cap.
+        if (s_servo_sweep.returningHome() && !s_pump_on && safe_to_home &&
+            s_servo_sweep.rearm(now)) {
+            s_home_completion_count++;
+            DBG.println("[SERVO] Nozzle at 90 deg; new OFF->ON cycle allowed.");
+        }
+        const bool pump_allowed = pump_request_allowed &&
+                                  !s_servo_sweep.consumed() && !s_servo_fault;
+#else
+        const bool pump_allowed = pump_request_allowed;
+#endif
+        pumpOutput.setEnabled(pump_allowed);
+#if SERVO_SWEEP_ENABLED
+        // Use gated pump state; while returning, update() keeps the servo
+        // energized at 90 for a short settle despite the pump being OFF.
+        const int nozzle_angle = s_servo_sweep.update(
+            pump_allowed && pumpOutput.ready(), now);
+        if (nozzle_angle < 0) {
+            if (servoOutput.active()) servoOutput.stop();
+            if (pump_allowed) {
+                s_servo_fault = true;
+                s_servo_sweep.abort();
+                pumpOutput.setEnabled(false);
+                DBG.println("[ERROR][SERVO] Sweep unavailable; pump OFF until reboot.");
+            }
+        } else if (!servoOutput.writeAngle(nozzle_angle)) {
+            s_servo_fault = true;
+            s_servo_sweep.abort();
+            pumpOutput.setEnabled(false);
+            servoOutput.stop();
+            DBG.println("[ERROR][SERVO] PWM write failed; pump and servo OFF until reboot.");
+        }
+#endif
+
         if (hostNow && !g_lastHostConnected) {
             DBG.println("[SERIAL] USB host connected (Activity confirmed)");
         }
@@ -366,14 +459,19 @@ void Task_SerialComm(void* pvParam) {
             } else {
                 OdometryData_t odom;
                 float gyro_z;
+                bool imu_valid;
                 uint32_t esp_ms = millis();
 
                 xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
                 odom = ctx->odom;
                 gyro_z = ctx->motionState.gyro_z;
+                imu_valid = ctx->imuValid;
                 xSemaphoreGive(ctx->stateMutex);
 
-                if (!isfinite(odom.x) || !isfinite(odom.y) || !isfinite(odom.yaw) ||
+                // STATE carries both odom and IMU with no validity bit. Drop
+                // the whole frame on an invalid gyro; Pi must not publish a
+                // fabricated /imu/data value as a fresh measurement.
+                if (!imu_valid || !isfinite(odom.x) || !isfinite(odom.y) || !isfinite(odom.yaw) ||
                     !isfinite(odom.linear_velocity) || !isfinite(odom.angular_velocity) ||
                     !isfinite(gyro_z)) {
                     g_telemetry.tx_drop++;
@@ -469,6 +567,82 @@ void Task_SerialComm(void* pvParam) {
                 }
             }
         }
+
+        // IR is deliberately queued after STATE/ENV. It may drop when the
+        // two-slot USB TX ring is busy; navigation telemetry keeps priority.
+        // Only copy the completed ADS1115 snapshot; never touch I2C here.
+        if (++irDivider >= 10) {
+            irDivider = 0;
+            if (sm.state != SessionState::ONLINE || sm.tx_count != 0 ||
+                Serial.availableForWrite() < 64) {
+                g_telemetry.tx_drop++;
+            } else {
+                uint16_t raw[3];
+                uint32_t sample_ms;
+                bool valid;
+                xSemaphoreTake(ctx->stateMutex, portMAX_DELAY);
+                raw[0] = ctx->irRaw[0];
+                raw[1] = ctx->irRaw[1];
+                raw[2] = ctx->irRaw[2];
+                sample_ms = ctx->irSampleMs;
+                valid = ctx->irValid;
+                xSemaphoreGive(ctx->stateMutex);
+
+                const uint32_t age_ms = millis() - sample_ms;
+                valid = valid && sample_ms != 0 && age_ms <= 300 &&
+                        raw[0] <= 32767 && raw[1] <= 32767 && raw[2] <= 32767;
+                if (!valid) {
+                    raw[0] = raw[1] = raw[2] = 0;
+                }
+                const int plen = snprintf(g_payloadBuf, sizeof(g_payloadBuf),
+                    "IR,2,%lu,%lu,%u,%u,%u,%u",
+                    (unsigned long)g_txSeq, (unsigned long)age_ms,
+                    (unsigned)raw[0], (unsigned)raw[1], (unsigned)raw[2],
+                    (unsigned)(valid ? 1 : 0));
+                if (plen > 0 && (size_t)plen < sizeof(g_payloadBuf)) {
+                    if (sm.enqueue(g_payloadBuf, 4, now + 100, g_telemetry)) {
+                        g_txSeq++;
+                    }
+                } else {
+                    g_telemetry.tx_drop++;
+                }
+            }
+        }
+
+#if SERVO_SWEEP_ENABLED
+        // Read-only commanded-state snapshot. Never read sensors or block
+        // STATE/IR transmission for this optional 2 Hz frame.
+        if (++actDivider >= 25) {
+            actDivider = 0;
+            if (sm.state == SessionState::ONLINE && sm.tx_count == 0 &&
+                Serial.availableForWrite() >= 64) {
+                const bool servo_pwm = servoOutput.active();
+                const uint8_t phase = (s_servo_fault ||
+                    (s_servo_sweep.consumed() &&
+                     !s_servo_sweep.returningHome())) ? 3 :
+                    s_servo_sweep.returningHome() ? 2 :
+                    s_servo_sweep.active() ? 1 : 0;
+                const unsigned angle = servo_pwm && nozzle_angle >= 0 ?
+                    (unsigned)nozzle_angle : 255;
+                const int plen = snprintf(g_payloadBuf, sizeof(g_payloadBuf),
+                    "ACT,2,%lu,%lu,%u,%u,%u,%u,%lu,%u",
+                    (unsigned long)g_txSeq, (unsigned long)now,
+                    (unsigned)pumpOutput.commandedOn(), (unsigned)phase,
+                    angle, (unsigned)servo_pwm,
+                    (unsigned long)s_home_completion_count,
+                    (unsigned)pumpOutput.ready());
+                if (plen > 0 && (size_t)plen < sizeof(g_payloadBuf)) {
+                    if (sm.enqueue(g_payloadBuf, 5, now + 150, g_telemetry)) {
+                        g_txSeq++;
+                    }
+                } else {
+                    g_telemetry.tx_drop++;
+                }
+            } else {
+                g_telemetry.tx_drop++;
+            }
+        }
+#endif
 
         // ========================================================
         // 4. TELEMETRY LOG mỗi 10 giây (qua DBG/Serial0)

@@ -504,6 +504,28 @@ bool SerialParser::parseFrame_(const char* frame, size_t len,
 // ============================================================
 // LIVENESS STATE MACHINE & TX PUMP
 // ============================================================
+size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
+                                  uint32_t now,
+                                  const UsbRecoveryDiagnostics& d,
+                                  const SerialCommTelemetry& t) {
+    const int length = snprintf(out, size,
+        "USB,2,%lu,%lu,%lu,%lu,%u,%u,%u,%u,%lu,%lu,%lu,%u,%lu,%lu,%lu",
+        (unsigned long)seq, (unsigned long)now,
+        (unsigned long)d.recoveries, (unsigned long)d.recovery_ms,
+        (unsigned)d.abort.reason, (unsigned)d.abort.offset,
+        (unsigned)d.abort.len, (unsigned)d.abort.available,
+        (unsigned long)d.abort.deadline_overrun_ms,
+        (unsigned long)d.task_gap_ms, (unsigned long)d.tx_event_age_ms,
+        (unsigned)d.tx_event_seen,
+        (unsigned long)t.tx_deadline_expired,
+        (unsigned long)t.tx_deadline_blocked,
+        (unsigned long)t.tx_short_write);
+    // Include the @, *, four CRC digits and LF in the wire size bound.
+    if (length <= 0 || (size_t)length >= size ||
+        (size_t)length + 7 > SERIAL_MAX_FRAME_SIZE) return 0;
+    return (size_t)length;
+}
+
 UsbRecoveryAction UsbRecoveryController::request(uint32_t now,
                                                  uint32_t detach_ms) {
     if (active_ || !recovery_armed_) {

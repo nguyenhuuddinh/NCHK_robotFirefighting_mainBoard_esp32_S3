@@ -623,6 +623,36 @@ void test_pump_millis_wrap_does_not_extend_run(void) {
     TEST_ASSERT_TRUE(pump.lockedOff());
 }
 
+void test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire(void) {
+    UsbRecoveryDiagnostics d;
+    d.recoveries = UINT32_MAX;
+    d.recovery_ms = UINT32_MAX;
+    d.abort.reason = TxAbortReason::DEADLINE;
+    d.abort.offset = 64;
+    d.abort.len = 192;
+    d.abort.available = 0;
+    d.abort.deadline_overrun_ms = UINT32_MAX;
+    d.task_gap_ms = UINT32_MAX;
+    d.tx_event_age_ms = UINT32_MAX;
+    d.tx_event_seen = true;
+    telemetry.tx_deadline_expired = UINT32_MAX;
+    telemetry.tx_deadline_blocked = UINT32_MAX;
+    telemetry.tx_short_write = UINT32_MAX;
+    sm.reset(); // A session reset must not clear the caller's snapshot.
+    char payload[SERIAL_BUFFER_SIZE];
+    char wire[SERIAL_BUFFER_SIZE];
+    TEST_ASSERT_TRUE(serialUsbDiagnosticsPayload(payload, sizeof(payload),
+        UINT32_MAX, UINT32_MAX, d, telemetry) > 0);
+    const char* expected =
+        "USB,2,4294967295,4294967295,4294967295,4294967295,1,64,192,0,"
+        "4294967295,4294967295,4294967295,1,4294967295,4294967295,4294967295";
+    TEST_ASSERT_EQUAL_STRING(expected, payload);
+    const size_t bytes = serialEncodeFrame(wire, sizeof(wire), payload);
+    TEST_ASSERT_TRUE(bytes > 0 && bytes <= SERIAL_MAX_FRAME_SIZE);
+    TEST_ASSERT_EQUAL(0, serialUsbDiagnosticsPayload(payload, 8,
+        0, 0, d, telemetry));
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_dtr_fall_and_cleanup_recovery);
@@ -658,5 +688,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pump_requires_host_and_explicit_off_to_rearm);
     RUN_TEST(test_pump_lease_and_hard_run_cap);
     RUN_TEST(test_pump_millis_wrap_does_not_extend_run);
+    RUN_TEST(test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire);
     return UNITY_END();
 }

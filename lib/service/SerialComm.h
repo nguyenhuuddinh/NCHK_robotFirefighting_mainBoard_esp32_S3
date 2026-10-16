@@ -263,6 +263,22 @@ struct TxAbortEvidence {
     bool transport_blocked = false;
 };
 
+// Diagnostic snapshot only. Owned by the serial task and retained across
+// logical USB session cleanup, but deliberately not across an MCU reset.
+struct UsbRecoveryDiagnostics {
+    uint32_t recoveries = 0;
+    uint32_t recovery_ms = 0;
+    TxAbortEvidence abort;
+    uint32_t task_gap_ms = 0;
+    uint32_t tx_event_age_ms = 0;
+    bool tx_event_seen = false;
+};
+
+size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
+                                  uint32_t now,
+                                  const UsbRecoveryDiagnostics& diagnostics,
+                                  const SerialCommTelemetry& telemetry);
+
 class TxLivenessStateMachine {
 public:
     SessionState state = SessionState::OFFLINE;

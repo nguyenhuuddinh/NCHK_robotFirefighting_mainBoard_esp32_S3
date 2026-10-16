@@ -192,6 +192,8 @@ void Task_SerialComm(void* pvParam) {
     uint32_t observedTxEvent = s_usb_tx_event_cnt;
     uint32_t lastTxObservedMs = lastTelemetryMs;
     bool txEventSeen = false;
+    UsbRecoveryDiagnostics usbDiagnostics;
+    uint32_t lastUsbDiagnosticsMs = lastTelemetryMs;
 
     TickType_t xLastWake = xTaskGetTickCount();
     // Phase IR two ticks (40ms) after STATE, allowing its USB frame to drain.
@@ -345,6 +347,7 @@ void Task_SerialComm(void* pvParam) {
         // mới được phép thực hiện physical USB detach/attach một lần.
         if (sm.recovery_pending) {
             const SessionRecoveryReason recoveryReason = sm.recovery_reason;
+            const TxAbortEvidence recoveryEvidence = sm.last_abort;
             if (recoveryReason == SessionRecoveryReason::HOST_DISCONNECTED) {
                 if (g_lastHostConnected) {
                     DBG.println("[SERIAL] USB host disconnected -> Offline");
@@ -371,6 +374,14 @@ void Task_SerialComm(void* pvParam) {
             // for the next DTR/RX session instead of creating an xHCI storm.
             if (recoveryReason == SessionRecoveryReason::TX_STALLED &&
                 usbRecovery.request(now) == UsbRecoveryAction::DETACH) {
+                // Snapshot survives cleanup/re-enumeration; report it over
+                // native CDC once the host is back, without a second USB cable.
+                usbDiagnostics.recoveries++;
+                usbDiagnostics.recovery_ms = now;
+                usbDiagnostics.abort = recoveryEvidence;
+                usbDiagnostics.task_gap_ms = taskGapMs;
+                usbDiagnostics.tx_event_age_ms = now - lastTxObservedMs;
+                usbDiagnostics.tx_event_seen = txEventSeen;
                 DBG.println("[SERIAL] USB CDC stalled -> soft reconnect");
                 tud_cdc_n_write_clear(0);
                 tud_cdc_n_read_flush(0);
@@ -670,6 +681,19 @@ void Task_SerialComm(void* pvParam) {
 #endif
 
         // ========================================================
+        // Optional diagnostics at <=0.2 Hz, behind all sensor/actuator frames.
+        // It never counts as a command or freshness/liveness proof on the Pi.
+        if ((uint32_t)(now - lastUsbDiagnosticsMs) >= 5000 &&
+            sm.state == SessionState::ONLINE && sm.tx_count == 0 &&
+            Serial.availableForWrite() >= 64) {
+            if (serialUsbDiagnosticsPayload(g_payloadBuf, sizeof(g_payloadBuf),
+                    g_txSeq, now, usbDiagnostics, g_telemetry) > 0 &&
+                sm.enqueue(g_payloadBuf, 6, now + 150, g_telemetry)) {
+                g_txSeq++;
+                lastUsbDiagnosticsMs = now;
+            }
+        }
+
         // 4. TELEMETRY LOG mỗi 10 giây (qua DBG/Serial0)
         // ========================================================
         now = millis();

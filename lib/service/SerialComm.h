@@ -57,7 +57,10 @@ struct SerialCommTelemetry {
     uint32_t tx_queued       = 0;  // Frame được đẩy vào internal queue
     uint32_t tx_completed    = 0;  // Frame hoàn tất gửi (all chunks sent)
     uint32_t tx_drop         = 0;  // Frame bị bỏ (offline, NaN, queue đầy)
-    uint32_t tx_partial      = 0;  // Chunk bị partial write / abort slot
+    uint32_t tx_partial      = 0;  // All aborted slots; not proof of USB stall
+    uint32_t tx_deadline_expired = 0; // Frame dropped after its freshness limit
+    uint32_t tx_deadline_blocked = 0; // Expired with observed, sustained full FIFO
+    uint32_t tx_short_write  = 0;  // Serial.write accepted fewer bytes than requested
 
     // USB CDC Events
     uint32_t usb_events      = 0;
@@ -241,12 +244,31 @@ struct TxSlot {
     uint16_t offset;
     uint8_t type; // 1=STATE, 2=ENV, 3=PROBE
     uint32_t deadline_ms;
+    bool blocked; // Full FIFO observed while this frame was still fresh
+    uint32_t blocked_tx_event_cnt;
+};
+
+enum class TxAbortReason {
+    NONE,
+    DEADLINE,
+    SHORT_WRITE
+};
+
+struct TxAbortEvidence {
+    TxAbortReason reason = TxAbortReason::NONE;
+    uint16_t offset = 0;
+    uint16_t len = 0;
+    size_t available = 0;
+    uint32_t deadline_overrun_ms = 0;
+    bool transport_blocked = false;
 };
 
 class TxLivenessStateMachine {
 public:
     SessionState state = SessionState::OFFLINE;
+    // Only transport failures since the last TX-complete event count here.
     uint32_t consecutive_partials = 0;
+    TxAbortEvidence last_abort;
 
     // TX Ring Queue
     TxSlot tx_queue[2];

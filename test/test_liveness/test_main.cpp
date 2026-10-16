@@ -278,6 +278,9 @@ void test_temporary_avail_zero_and_deadline_wrap(void) {
 
     TEST_ASSERT_EQUAL(0, sm.tx_count);
     TEST_ASSERT_EQUAL(1, sm.consecutive_partials);
+    TEST_ASSERT_EQUAL(1, telemetry.tx_deadline_expired);
+    TEST_ASSERT_EQUAL(1, telemetry.tx_deadline_blocked);
+    TEST_ASSERT_EQUAL(26, sm.last_abort.deadline_overrun_ms);
 }
 
 void test_usb_recovery_detach_is_one_shot(void) {
@@ -299,6 +302,166 @@ void test_usb_recovery_detach_is_one_shot(void) {
     TEST_ASSERT_EQUAL(UsbRecoveryAction::NONE, recovery.poll(2001));
     TEST_ASSERT_EQUAL(
         UsbRecoveryAction::NONE, recovery.request(10000, 250));
+}
+
+void test_unsent_expired_frames_do_not_prove_tx_stall(void) {
+    // The task missed the entire deadline, so no transport attempt happened.
+    // Even a full FIFO on its first observation does not prove a sustained stall.
+    const size_t fifo_space[] = {64, 0};
+    for (size_t available : fifo_space) {
+        sm.reset();
+        sm.state = SessionState::ONLINE;
+        Serial.mock_avail = available;
+        for (uint32_t now = 0; now < 600; now += 200) {
+            TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, now + 100, telemetry));
+            sm.pump_tx(now + 120, telemetry);
+            sm.update(true, s_usb_tx_event_cnt, true);
+            TEST_ASSERT_FALSE(sm.recovery_pending);
+            TEST_ASSERT_EQUAL(0, sm.consecutive_partials);
+        }
+        TEST_ASSERT_EQUAL(0, Serial.capture_len);
+        TEST_ASSERT_EQUAL(0, sm.tx_count);
+    }
+    TEST_ASSERT_EQUAL(6, telemetry.tx_deadline_expired);
+    TEST_ASSERT_EQUAL(0, telemetry.tx_deadline_blocked);
+    TEST_ASSERT_EQUAL(0, telemetry.tx_short_write);
+    TEST_ASSERT_EQUAL(TxAbortReason::DEADLINE, sm.last_abort.reason);
+    TEST_ASSERT_EQUAL(0, sm.last_abort.offset);
+    TEST_ASSERT_EQUAL(20, sm.last_abort.deadline_overrun_ms);
+    TEST_ASSERT_FALSE(sm.last_abort.transport_blocked);
+}
+
+void test_partly_sent_frame_expiry_with_free_fifo_is_not_stall(void) {
+    sm.state = SessionState::ONLINE;
+    Serial.mock_avail = 64;
+    const char* long_payload =
+        "STATE,2,123456789,123456789,-123.456,-123.456,-123.456,"
+        "-123.456,-123.456,-123.456";
+    for (uint32_t now = 0; now < 600; now += 200) {
+        TEST_ASSERT_TRUE(sm.enqueue(long_payload, 1, now + 100, telemetry));
+        sm.pump_tx(now + 20, telemetry);
+        TEST_ASSERT_EQUAL(64, sm.tx_queue[sm.tx_head].offset);
+        // Missing a later task tick must not turn a successful write into a stall.
+        sm.pump_tx(now + 120, telemetry);
+        sm.update(true, s_usb_tx_event_cnt, true);
+        TEST_ASSERT_FALSE(sm.recovery_pending);
+        TEST_ASSERT_EQUAL(0, sm.consecutive_partials);
+    }
+    TEST_ASSERT_EQUAL(192, Serial.capture_len);
+    TEST_ASSERT_EQUAL(64, sm.last_abort.offset);
+    TEST_ASSERT_EQUAL(64, sm.last_abort.available);
+}
+
+void test_transient_full_fifo_that_drains_before_expiry_is_not_stall(void) {
+    sm.state = SessionState::ONLINE;
+    for (uint32_t now = 0; now < 600; now += 200) {
+        TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, now + 100, telemetry));
+        Serial.mock_avail = 0;
+        sm.pump_tx(now + 20, telemetry);
+        Serial.mock_avail = 64;
+        sm.pump_tx(now + 120, telemetry);
+        sm.update(true, s_usb_tx_event_cnt, true);
+        TEST_ASSERT_FALSE(sm.recovery_pending);
+        TEST_ASSERT_EQUAL(0, sm.consecutive_partials);
+    }
+}
+
+void test_tx_completion_invalidates_old_blocked_observation(void) {
+    sm.state = SessionState::ONLINE;
+    Serial.mock_avail = 0;
+    s_usb_tx_event_cnt = UINT32_MAX;
+    sm.update(true, s_usb_tx_event_cnt, true);
+    for (uint32_t now = 0; now < 600; now += 200) {
+        TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, now + 100, telemetry));
+        sm.pump_tx(now + 20, telemetry);
+        sm.update(true, ++s_usb_tx_event_cnt, true);
+        // No new blocked attempt since the host made progress.
+        sm.pump_tx(now + 120, telemetry);
+        TEST_ASSERT_EQUAL(0, sm.consecutive_partials);
+        TEST_ASSERT_FALSE(sm.recovery_pending);
+    }
+}
+
+void test_sustained_full_fifo_still_recovers_with_valid_rx(void) {
+    sm.state = SessionState::ONLINE;
+    Serial.mock_avail = 0;
+    for (uint32_t i = 0; i < 3; ++i) {
+        const uint32_t now = i * 200;
+        TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, now + 100, telemetry));
+        sm.pump_tx(now + 20, telemetry);
+        sm.pump_tx(now + 80, telemetry);
+        sm.pump_tx(now + 100, telemetry);
+        sm.update(true, s_usb_tx_event_cnt, true);
+        TEST_ASSERT_EQUAL(i + 1, sm.consecutive_partials);
+        TEST_ASSERT_EQUAL(i == 2, sm.recovery_pending);
+    }
+    TEST_ASSERT_EQUAL(SessionRecoveryReason::TX_STALLED, sm.recovery_reason);
+    TEST_ASSERT_EQUAL(3, telemetry.tx_deadline_expired);
+    TEST_ASSERT_EQUAL(3, telemetry.tx_deadline_blocked);
+    TEST_ASSERT_TRUE(sm.last_abort.transport_blocked);
+    TEST_ASSERT_EQUAL(0, sm.last_abort.available);
+}
+
+void test_short_writes_still_trigger_tx_recovery(void) {
+    sm.state = SessionState::ONLINE;
+    Serial.mock_avail = 64;
+    Serial.next_write_limit = 1;
+    for (uint32_t i = 0; i < 3; ++i) {
+        TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, 100, telemetry));
+        sm.pump_tx(20, telemetry);
+        sm.update(true, s_usb_tx_event_cnt, true);
+        TEST_ASSERT_EQUAL(i + 1, sm.consecutive_partials);
+        TEST_ASSERT_EQUAL(i == 2, sm.recovery_pending);
+    }
+    TEST_ASSERT_EQUAL(SessionRecoveryReason::TX_STALLED, sm.recovery_reason);
+    TEST_ASSERT_EQUAL(3, telemetry.tx_short_write);
+    TEST_ASSERT_EQUAL(0, telemetry.tx_deadline_expired);
+    TEST_ASSERT_EQUAL(TxAbortReason::SHORT_WRITE, sm.last_abort.reason);
+    TEST_ASSERT_EQUAL(1, sm.last_abort.offset);
+    TEST_ASSERT_TRUE(sm.last_abort.transport_blocked);
+}
+
+void test_buffer_acceptance_alone_cannot_hide_later_tx_stall(void) {
+    sm.state = SessionState::ONLINE;
+    // Serial.write accepting bytes only puts them into the device FIFO.
+    // Without TX-complete, a subsequently full endpoint still needs recovery.
+    TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, 100, telemetry));
+    Serial.mock_avail = 64;
+    sm.pump_tx(20, telemetry);
+    TEST_ASSERT_EQUAL(1, telemetry.tx_completed);
+    TEST_ASSERT_EQUAL(0, s_usb_tx_event_cnt);
+    Serial.mock_avail = 0;
+    for (uint32_t i = 0; i < 3; ++i) {
+        const uint32_t now = 200 + i * 200;
+        TEST_ASSERT_TRUE(sm.enqueue("STATE,2,2", 1, now + 100, telemetry));
+        sm.pump_tx(now + 20, telemetry);
+        sm.pump_tx(now + 100, telemetry);
+        sm.update(true, s_usb_tx_event_cnt, true);
+    }
+    TEST_ASSERT_TRUE(sm.recovery_pending);
+    TEST_ASSERT_EQUAL(SessionRecoveryReason::TX_STALLED, sm.recovery_reason);
+    // Session cleanup clears diagnostics that refer to the previous queue.
+    sm.reset();
+    TEST_ASSERT_EQUAL(TxAbortReason::NONE, sm.last_abort.reason);
+    TEST_ASSERT_EQUAL(0, sm.consecutive_partials);
+}
+
+void test_unserviced_queue_tail_does_not_inherit_head_stall(void) {
+    sm.state = SessionState::ONLINE;
+    Serial.mock_avail = 0;
+    TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, 100, telemetry));
+    TEST_ASSERT_TRUE(sm.enqueue("ENV,2,2", 2, 100, telemetry));
+    sm.pump_tx(20, telemetry);
+    sm.pump_tx(120, telemetry); // Head has observed a full FIFO twice.
+    TEST_ASSERT_EQUAL(1, sm.consecutive_partials);
+    sm.pump_tx(140, telemetry); // Tail first serviced after deadline.
+    TEST_ASSERT_EQUAL(1, sm.consecutive_partials);
+    // Reused ring slot must also start without the previous blocked evidence.
+    TEST_ASSERT_TRUE(sm.enqueue("STATE,2,3", 1, 200, telemetry));
+    sm.pump_tx(220, telemetry);
+    sm.update(true, s_usb_tx_event_cnt, true);
+    TEST_ASSERT_EQUAL(1, sm.consecutive_partials);
+    TEST_ASSERT_FALSE(sm.recovery_pending);
 }
 
 void test_usb_recovery_deadline_wrap(void) {
@@ -475,6 +638,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_actual_partial_abort_resync_parser);
     RUN_TEST(test_scheduler_rate);
     RUN_TEST(test_temporary_avail_zero_and_deadline_wrap);
+    RUN_TEST(test_unsent_expired_frames_do_not_prove_tx_stall);
+    RUN_TEST(test_partly_sent_frame_expiry_with_free_fifo_is_not_stall);
+    RUN_TEST(test_transient_full_fifo_that_drains_before_expiry_is_not_stall);
+    RUN_TEST(test_tx_completion_invalidates_old_blocked_observation);
+    RUN_TEST(test_sustained_full_fifo_still_recovers_with_valid_rx);
+    RUN_TEST(test_short_writes_still_trigger_tx_recovery);
+    RUN_TEST(test_buffer_acceptance_alone_cannot_hide_later_tx_stall);
+    RUN_TEST(test_unserviced_queue_tail_does_not_inherit_head_stall);
     RUN_TEST(test_usb_recovery_detach_is_one_shot);
     RUN_TEST(test_usb_recovery_deadline_wrap);
     RUN_TEST(test_usb_recovery_can_run_again_after_attach);

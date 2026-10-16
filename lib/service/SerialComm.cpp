@@ -602,6 +602,8 @@ bool TxLivenessStateMachine::enqueue(const char* payload, uint8_t type,
         tx_queue[tx_tail].offset = 0;
         tx_queue[tx_tail].type = type;
         tx_queue[tx_tail].deadline_ms = deadline_ms;
+        tx_queue[tx_tail].blocked = false;
+        tx_queue[tx_tail].blocked_tx_event_cnt = last_tx_event_cnt;
 
         tx_tail = (tx_tail + 1) % 2;
         tx_count++;
@@ -637,8 +639,25 @@ void TxLivenessStateMachine::pump_tx(uint32_t now,
         TxSlot* head = &tx_queue[tx_head];
 
         if ((int32_t)(now - head->deadline_ms) >= 0) {
+            // A late task or time spent behind another queue entry can expire
+            // a healthy frame without ever attempting USB I/O. Require a full
+            // FIFO seen before the deadline AND still full now, with no host
+            // TX completion in between, before counting transport failure.
+            const size_t avail = Serial.availableForWrite();
+            const bool stalled = head->blocked && avail == 0 &&
+                head->blocked_tx_event_cnt == last_tx_event_cnt;
             telemetry.tx_partial++;
-            consecutive_partials++;
+            telemetry.tx_deadline_expired++;
+            if (stalled) {
+                telemetry.tx_deadline_blocked++;
+                consecutive_partials++;
+            }
+            last_abort.reason = TxAbortReason::DEADLINE;
+            last_abort.offset = head->offset;
+            last_abort.len = head->len;
+            last_abort.available = avail;
+            last_abort.deadline_overrun_ms = now - head->deadline_ms;
+            last_abort.transport_blocked = stalled;
             tx_count--;
             tx_head = (tx_head + 1) % 2;
         } else {
@@ -651,6 +670,7 @@ void TxLivenessStateMachine::pump_tx(uint32_t now,
             if (chunk > 0) {
                 size_t written = Serial.write((const uint8_t*)&head->data[head->offset], chunk);
                 if (written == chunk) {
+                    head->blocked = false;
                     head->offset += written;
                     if (head->offset >= head->len) {
                         telemetry.tx_completed++;
@@ -661,10 +681,20 @@ void TxLivenessStateMachine::pump_tx(uint32_t now,
                 } else {
                     // [F2-L24-3] Partial write -> Abort ngay lập tức, resync ở delimiter
                     telemetry.tx_partial++;
+                    telemetry.tx_short_write++;
                     consecutive_partials++;
+                    last_abort.reason = TxAbortReason::SHORT_WRITE;
+                    last_abort.offset = head->offset + written;
+                    last_abort.len = head->len;
+                    last_abort.available = avail;
+                    last_abort.deadline_overrun_ms = 0;
+                    last_abort.transport_blocked = true;
                     tx_count--;
                     tx_head = (tx_head + 1) % 2;
                 }
+            } else if (avail == 0) {
+                head->blocked = true;
+                head->blocked_tx_event_cnt = last_tx_event_cnt;
             }
         }
     }
@@ -673,6 +703,7 @@ void TxLivenessStateMachine::pump_tx(uint32_t now,
 void TxLivenessStateMachine::reset() {
     state = SessionState::OFFLINE;
     consecutive_partials = 0;
+    last_abort = TxAbortEvidence();
     recovery_pending = false;
     recovery_reason = SessionRecoveryReason::NONE;
     probe_armed = false;

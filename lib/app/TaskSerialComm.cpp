@@ -187,6 +187,11 @@ void Task_SerialComm(void* pvParam) {
 
     // Divider cho telemetry log (mỗi 10 giây)
     uint32_t lastTelemetryMs = millis();
+    uint32_t lastTaskMs = lastTelemetryMs;
+    uint32_t taskGapMaxMs = 0;
+    uint32_t observedTxEvent = s_usb_tx_event_cnt;
+    uint32_t lastTxObservedMs = lastTelemetryMs;
+    bool txEventSeen = false;
 
     TickType_t xLastWake = xTaskGetTickCount();
     // Phase IR two ticks (40ms) after STATE, allowing its USB frame to drain.
@@ -216,6 +221,9 @@ void Task_SerialComm(void* pvParam) {
         // 0.5 [F2-L9-1] USB CDC Bootstrap & Reconnect Detection
         // ========================================================
         const uint32_t pre_rx_ms = millis();
+        const uint32_t taskGapMs = pre_rx_ms - lastTaskMs;
+        lastTaskMs = pre_rx_ms;
+        if (taskGapMs > taskGapMaxMs) taskGapMaxMs = taskGapMs;
 
         // 1. Khai báo các trạng thái liveness/probe tĩnh
         static TxLivenessStateMachine sm;
@@ -315,6 +323,12 @@ void Task_SerialComm(void* pvParam) {
         // Sample again after RX so PumpSafety::tick never sees a time earlier
         // than the latest request and falsely latches LEASE_EXPIRED.
         uint32_t now = millis();
+        const uint32_t txEvent = s_usb_tx_event_cnt;
+        if (txEvent != observedTxEvent) {
+            observedTxEvent = txEvent;
+            lastTxObservedMs = now;
+            txEventSeen = true;
+        }
 
         // ========================================================
         // 2. Tính/Recompute hostNow TỪ LIVENESS STATE MACHINE
@@ -324,7 +338,7 @@ void Task_SerialComm(void* pvParam) {
             fast_disconnect = false;
         } else {
             sm.update(
-                s_dtr_active, s_usb_tx_event_cnt, valid_rx_activity);
+                s_dtr_active, txEvent, valid_rx_activity);
         }
 
         // DTR drop chỉ đóng session logic. Chỉ TX stall khi host còn active
@@ -338,6 +352,17 @@ void Task_SerialComm(void* pvParam) {
                 usbRecovery.observeHostDisconnect();
             } else if (recoveryReason == SessionRecoveryReason::TX_STALLED) {
                 DBG.println("[SERIAL] USB CDC TX stalled -> Recovery");
+                // Capture evidence before cleanup_session resets the queue.
+                DBG.printf("[SERIAL] TX evidence: reason=%u offset=%u len=%u avail=%u late_ms=%lu blocked=%d failures=%lu\n",
+                    (unsigned)sm.last_abort.reason, (unsigned)sm.last_abort.offset,
+                    (unsigned)sm.last_abort.len, (unsigned)sm.last_abort.available,
+                    (unsigned long)sm.last_abort.deadline_overrun_ms,
+                    (int)sm.last_abort.transport_blocked,
+                    (unsigned long)sm.consecutive_partials);
+                DBG.printf("[SERIAL] TX timing: task_gap_ms=%lu max_gap_ms=%lu tx_evt=%lu seen=%d observed_age_ms=%lu\n",
+                    (unsigned long)taskGapMs, (unsigned long)taskGapMaxMs,
+                    (unsigned long)txEvent, (int)txEventSeen,
+                    (unsigned long)(now - lastTxObservedMs));
             }
             cleanup_session(); // resets sm internally, clears recovery_pending
 
@@ -669,6 +694,12 @@ void Task_SerialComm(void* pvParam) {
                 g_telemetry.tx_generated, g_telemetry.tx_queued,
                 g_telemetry.tx_completed, g_telemetry.tx_drop,
                 g_telemetry.tx_partial);
+            DBG.printf("  TX aborts: deadline=%lu blocked=%lu short_write=%lu task_gap_max_ms=%lu\n",
+                (unsigned long)g_telemetry.tx_deadline_expired,
+                (unsigned long)g_telemetry.tx_deadline_blocked,
+                (unsigned long)g_telemetry.tx_short_write,
+                (unsigned long)taskGapMaxMs);
+            taskGapMaxMs = 0;
 
             // Log TinyUSB CDC events [F2-L26-5]
             DBG.printf("  host: up=%d dtr=%d usb_evt=%lu tx_evt=%lu state=%d part=%lu arm=%d base=%lu\n",

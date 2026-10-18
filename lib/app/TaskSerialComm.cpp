@@ -31,6 +31,8 @@
 #include "ServoConfig.h"
 #include <Arduino.h>
 #include <math.h>
+#include <esp_ota_ops.h>
+#include <esp_system.h>
 #include <soc/usb_wrap_struct.h>
 #include <tusb.h>
 
@@ -188,6 +190,15 @@ void Task_SerialComm(void* pvParam) {
     // Reset parser
     g_parser.reset();
 
+    // Immutable boot identity, read once. A CDC soft reconnect leaves both
+    // reset reason and ELF SHA unchanged; an MCU reboot starts a new sample.
+    const uint32_t bootResetReason = (uint32_t)esp_reset_reason();
+    char bootElfSha[65] = {0};
+    const char* bootIdentity =
+        (esp_ota_get_app_elf_sha256(bootElfSha, sizeof(bootElfSha)) == 65)
+            ? bootElfSha : "unknown";
+    bool bootIdentityPending = false;
+
 
     // Divider cho telemetry log (mỗi 10 giây)
     uint32_t lastTelemetryMs = millis();
@@ -256,6 +267,7 @@ void Task_SerialComm(void* pvParam) {
             sm.reset();
             g_lastHostConnected = false;
             s_discarding = true;
+            bootIdentityPending = false;
         };
 
         auto cleanup_disconnected_session = [&]() {
@@ -410,6 +422,9 @@ void Task_SerialComm(void* pvParam) {
 
         if (hostNow && !g_lastHostConnected) {
             DBG.println("[SERIAL] USB host connected (Activity confirmed)");
+            bootIdentityPending = true;
+        } else if (!hostNow) {
+            bootIdentityPending = false;
         }
         g_lastHostConnected = hostNow;
 
@@ -627,6 +642,26 @@ void Task_SerialComm(void* pvParam) {
                 sm.enqueue(g_payloadBuf, 6, now + 150, g_telemetry)) {
                 g_txSeq++;
                 lastUsbDiagnosticsMs = now;
+            }
+        }
+
+        // At most one low-priority identity frame per confirmed USB session.
+        // It uses the existing bounded TX ring and never marks STATE healthy.
+        if (bootIdentityPending && sm.state == SessionState::ONLINE &&
+            sm.tx_count == 0 && sm.consecutive_partials == 0 &&
+            Serial.availableForWrite() >= 64) {
+            size_t identityLen = serialBootIdentityPayload(
+                g_payloadBuf, sizeof(g_payloadBuf), g_txSeq, now,
+                bootResetReason, bootIdentity);
+            if (identityLen == 0) {
+                identityLen = serialBootIdentityPayload(
+                    g_payloadBuf, sizeof(g_payloadBuf), g_txSeq, now,
+                    bootResetReason, "unknown");
+            }
+            if (identityLen > 0 &&
+                sm.enqueue(g_payloadBuf, 7, now + 150, g_telemetry)) {
+                g_txSeq++;
+                bootIdentityPending = false;
             }
         }
 

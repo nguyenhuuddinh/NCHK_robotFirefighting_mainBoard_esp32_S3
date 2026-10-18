@@ -14,6 +14,7 @@
  *   STATE,2,seq,esp_ms,x,y,yaw,vx,wz,gyro_z  @ 10Hz
  *   ENV,2,seq,fire_flags,gas_ppm,temp_c,batt_v,valid  @ 2Hz
  *   ACT,2,seq,esp_ms,pump_pwm,servo_phase,angle,servo_pwm,home_count,pump_ready @ 2Hz best effort
+ *   BOOT,2,seq,esp_ms,reset_reason,elf_sha256 @ one per USB session, diagnostic
  *
  * RX (Pi -> ESP32):
  *   CMD,2,seq,vx,wz
@@ -278,6 +279,12 @@ size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
                                   uint32_t now,
                                   const UsbRecoveryDiagnostics& diagnostics,
                                   const SerialCommTelemetry& telemetry);
+
+// One-shot diagnostic frame. `elf_sha256` is 64 hex chars or "unknown".
+// It never carries command or safety admission state.
+size_t serialBootIdentityPayload(char* out, size_t size, uint32_t seq,
+                                 uint32_t now, uint32_t reset_reason,
+                                 const char* elf_sha256);
 
 class TxLivenessStateMachine {
 public:

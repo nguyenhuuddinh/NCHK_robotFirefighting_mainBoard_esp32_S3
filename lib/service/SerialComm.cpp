@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <ctype.h>
 
 // ============================================================
 // CRC16-CCITT-FALSE (byte-at-a-time, no lookup table)
@@ -521,6 +522,25 @@ size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
         (unsigned long)t.tx_deadline_blocked,
         (unsigned long)t.tx_short_write);
     // Include the @, *, four CRC digits and LF in the wire size bound.
+    if (length <= 0 || (size_t)length >= size ||
+        (size_t)length + 7 > SERIAL_MAX_FRAME_SIZE) return 0;
+    return (size_t)length;
+}
+
+size_t serialBootIdentityPayload(char* out, size_t size, uint32_t seq,
+                                 uint32_t now, uint32_t reset_reason,
+                                 const char* elf_sha256) {
+    if (out == nullptr || size == 0 || elf_sha256 == nullptr) return 0;
+    const size_t hash_len = strlen(elf_sha256);
+    if (strcmp(elf_sha256, "unknown") != 0) {
+        if (hash_len != 64) return 0;
+        for (size_t i = 0; i < hash_len; ++i) {
+            if (!isxdigit((unsigned char)elf_sha256[i])) return 0;
+        }
+    }
+    const int length = snprintf(out, size, "BOOT,2,%lu,%lu,%lu,%s",
+                                (unsigned long)seq, (unsigned long)now,
+                                (unsigned long)reset_reason, elf_sha256);
     if (length <= 0 || (size_t)length >= size ||
         (size_t)length + 7 > SERIAL_MAX_FRAME_SIZE) return 0;
     return (size_t)length;

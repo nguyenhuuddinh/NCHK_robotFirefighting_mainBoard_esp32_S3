@@ -712,6 +712,28 @@ void test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire(void) {
         0, 0, d, telemetry));
 }
 
+void test_boot_identity_is_bounded_diagnostic_frame(void) {
+    char sha[65];
+    for (size_t i = 0; i < 64; ++i) sha[i] = 'a';
+    sha[64] = '\0';
+    char payload[SERIAL_BUFFER_SIZE];
+    char wire[SERIAL_BUFFER_SIZE];
+    TEST_ASSERT_TRUE(serialBootIdentityPayload(payload, sizeof(payload),
+        UINT32_MAX, UINT32_MAX, 9, sha) > 0);
+    TEST_ASSERT_EQUAL_STRING("BOOT,2,4294967295,4294967295,9,"
+                             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                             payload);
+    const size_t bytes = serialEncodeFrame(wire, sizeof(wire), payload);
+    TEST_ASSERT_TRUE(bytes > 0 && bytes <= SERIAL_MAX_FRAME_SIZE);
+    TEST_ASSERT_TRUE(serialBootIdentityPayload(payload, sizeof(payload),
+        1, 2, 0, "unknown") > 0);
+    TEST_ASSERT_EQUAL_STRING("BOOT,2,1,2,0,unknown", payload);
+    TEST_ASSERT_EQUAL(0, serialBootIdentityPayload(payload, 3,
+        1, 2, 0, "unknown"));
+    TEST_ASSERT_EQUAL(0, serialBootIdentityPayload(payload, sizeof(payload),
+        1, 2, 0, "bad,field"));
+}
+
 void test_early_open_snapshot_survives_next_idle_rx_tick(void) {
     UsbLineState line;
     // The host opened before callback registration, so no event reached us.
@@ -839,6 +861,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pump_lease_and_hard_run_cap);
     RUN_TEST(test_pump_millis_wrap_does_not_extend_run);
     RUN_TEST(test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire);
+    RUN_TEST(test_boot_identity_is_bounded_diagnostic_frame);
     RUN_TEST(test_early_open_snapshot_survives_next_idle_rx_tick);
     RUN_TEST(test_startup_snapshot_does_not_bypass_probe_or_disconnect);
     RUN_TEST(test_close_during_startup_snapshot_wins_over_stale_open);

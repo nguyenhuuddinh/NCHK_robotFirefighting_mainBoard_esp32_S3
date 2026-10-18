@@ -1,7 +1,10 @@
 #include <unity.h>
 #include "../../lib/service/SerialComm.cpp"
 #include "SerialComm.h"
+#include "UsbLineState.h"
 #include "../../lib/service/PumpSafety.h"
+#include "../../lib/service/CommandFreshness.h"
+#include "../../lib/service/ActuatorLease.h"
 
 uint32_t s_usb_tx_event_cnt = 0;
 HardwareSerial Serial;
@@ -23,6 +26,62 @@ void setUp(void) {
 }
 
 void tearDown(void) {}
+
+void test_motion_command_age_stops_when_serial_task_stalls(void) {
+    const uint32_t timeout_ms = 1000;
+    const uint32_t received_ms = 500;
+    TEST_ASSERT_FALSE(commandIsFresh(false, received_ms, received_ms, timeout_ms));
+    TEST_ASSERT_TRUE(commandIsFresh(true, received_ms, 1500, timeout_ms));
+    // Only Motion's clock advances. No serial callback or RobotMaster::update.
+    TEST_ASSERT_FALSE(commandIsFresh(true, received_ms, 1501, timeout_ms));
+}
+
+void test_motion_command_age_wraps_without_rearming_stale_command(void) {
+    const uint32_t received_ms = UINT32_MAX - 100;
+    TEST_ASSERT_TRUE(commandIsFresh(true, received_ms, 50, 1000));
+    TEST_ASSERT_FALSE(commandIsFresh(true, received_ms, 901, 1000));
+}
+
+void test_pump_owner_stops_when_serial_task_stalls(void) {
+    PumpSafety pump;
+    pump.request(true, 100);
+    TEST_ASSERT_TRUE(pump.tick(100,
+        actuatorSerialLinkFresh(true, 100, 100)));
+    // No serial tick or PUMP refresh. The independent owner keeps ticking.
+    TEST_ASSERT_TRUE(pump.tick(350,
+        actuatorSerialLinkFresh(true, 100, 350)));
+    TEST_ASSERT_FALSE(pump.tick(351,
+        actuatorSerialLinkFresh(true, 100, 351)));
+    TEST_ASSERT_TRUE(pump.lockedOff());
+    pump.request(true, 352);
+    TEST_ASSERT_FALSE(pump.tick(352, true));
+    pump.request(false, 353);
+    pump.request(true, 354);
+    TEST_ASSERT_TRUE(pump.tick(354, true));
+}
+
+void test_pump_serial_lease_wraps_without_extending_deadline(void) {
+    const uint32_t tick = UINT32_MAX - 100;
+    TEST_ASSERT_TRUE(actuatorSerialLinkFresh(true, tick, tick + 250));
+    TEST_ASSERT_FALSE(actuatorSerialLinkFresh(true, tick, tick + 251));
+    TEST_ASSERT_FALSE(actuatorSerialLinkFresh(false, tick, tick));
+}
+
+void test_fleeting_pump_off_does_not_restart_continuous_run_cap(void) {
+    PumpSafety pump;
+    pump.request(true, 100);
+    TEST_ASSERT_TRUE(pump.tick(100, true));
+    // Both frames arrive before the actuator owner gets a cycle. PWM stayed ON.
+    TEST_ASSERT_FALSE(actuatorObservedOff(1, 0, true));
+    pump.request(true, 5100);
+    TEST_ASSERT_FALSE(pump.tick(5100, true));
+    TEST_ASSERT_TRUE(pump.lockedOff());
+    // An OFF present at an owner tick still clears the latch.
+    TEST_ASSERT_TRUE(actuatorObservedOff(2, 1, false));
+    pump.request(false, 5101);
+    pump.request(true, 5102);
+    TEST_ASSERT_TRUE(pump.tick(5102, true));
+}
 
 void test_dtr_fall_and_cleanup_recovery(void) {
     // DTR fall requests logical cleanup, never a physical USB recovery.
@@ -653,8 +712,99 @@ void test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire(void) {
         0, 0, d, telemetry));
 }
 
+void test_early_open_snapshot_survives_next_idle_rx_tick(void) {
+    UsbLineState line;
+    // The host opened before callback registration, so no event reached us.
+    TEST_ASSERT_TRUE(line.seedIfUnchanged(line.revision(), true));
+    sm.update(line.dtr(), 0, true);
+    TEST_ASSERT_TRUE(sm.enqueue("STATE,2,1", 1, 100, telemetry));
+    sm.update(line.dtr(), 0, false);
+    TEST_ASSERT_EQUAL(SessionState::ONLINE, sm.state);
+    TEST_ASSERT_FALSE(sm.recovery_pending);
+    sm.pump_tx(20, telemetry);
+    TEST_ASSERT_EQUAL(1, telemetry.tx_completed);
+    TEST_ASSERT_EQUAL(0, line.disconnectEpoch());
+}
+
+void test_startup_snapshot_does_not_bypass_probe_or_disconnect(void) {
+    UsbLineState line;
+    TEST_ASSERT_TRUE(line.seedIfUnchanged(line.revision(), false));
+    sm.update(line.dtr(), 0);
+    TEST_ASSERT_EQUAL(SessionState::OFFLINE, sm.state);
+    TEST_ASSERT_FALSE(sm.recovery_pending);
+    line.onLineState(true); // Normal host open after startup.
+    sm.update(line.dtr(), 0);
+    TEST_ASSERT_EQUAL(SessionState::PROBING, sm.state);
+    TEST_ASSERT_FALSE(sm.recovery_pending);
+    line.onLineState(false); // Real close must still tear down the session.
+    sm.update(line.dtr(), 0);
+    TEST_ASSERT_EQUAL(1, line.disconnectEpoch());
+    TEST_ASSERT_EQUAL(SessionRecoveryReason::HOST_DISCONNECTED,
+                      sm.recovery_reason);
+}
+
+void test_close_during_startup_snapshot_wins_over_stale_open(void) {
+    UsbLineState line;
+    line.onLineState(true);
+    const uint32_t revision_before_read = line.revision();
+    line.onLineState(false); // Callback arrives before snapshot commit.
+    TEST_ASSERT_FALSE(line.seedIfUnchanged(revision_before_read, true));
+    TEST_ASSERT_FALSE(line.dtr());
+    TEST_ASSERT_EQUAL(1, line.disconnectEpoch());
+}
+
+void test_open_during_startup_snapshot_wins_over_stale_closed(void) {
+    UsbLineState line;
+    const uint32_t revision_before_read = line.revision();
+    line.onLineState(true);
+    TEST_ASSERT_FALSE(line.seedIfUnchanged(revision_before_read, false));
+    TEST_ASSERT_TRUE(line.dtr());
+    TEST_ASSERT_EQUAL(0, line.disconnectEpoch());
+}
+
+void test_close_after_startup_snapshot_still_invalidates_session(void) {
+    UsbLineState line;
+    TEST_ASSERT_TRUE(line.seedIfUnchanged(line.revision(), true));
+    sm.update(line.dtr(), 0, true);
+    line.onDisconnect(); // Callback arrives after snapshot commit.
+    sm.update(line.dtr(), 0);
+    TEST_ASSERT_FALSE(line.dtr());
+    TEST_ASSERT_EQUAL(1, line.disconnectEpoch());
+    TEST_ASSERT_EQUAL(SessionRecoveryReason::HOST_DISCONNECTED,
+                      sm.recovery_reason);
+}
+
+void test_startup_snapshot_of_closed_usb_preserves_discard_epoch(void) {
+    UsbLineState line;
+    line.onLineState(true);
+    // The USB stack sees close before the queued close callback arrives.
+    TEST_ASSERT_TRUE(line.seedIfUnchanged(line.revision(), false));
+    TEST_ASSERT_FALSE(line.dtr());
+    TEST_ASSERT_EQUAL(1, line.disconnectEpoch());
+    line.onLineState(false);
+    TEST_ASSERT_EQUAL(1, line.disconnectEpoch());
+}
+
+void test_forced_detach_cannot_be_undone_by_startup_snapshot(void) {
+    UsbLineState line;
+    line.onLineState(true);
+    const uint32_t revision_before_read = line.revision();
+    line.onDisconnect(); // Same method used before firmware soft detach.
+    TEST_ASSERT_FALSE(line.seedIfUnchanged(revision_before_read, true));
+    TEST_ASSERT_FALSE(line.dtr());
+    TEST_ASSERT_EQUAL(1, line.disconnectEpoch());
+    sm.update(line.dtr(), 0);
+    TEST_ASSERT_EQUAL(SessionState::OFFLINE, sm.state);
+    TEST_ASSERT_FALSE(sm.recovery_pending);
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
+    RUN_TEST(test_motion_command_age_stops_when_serial_task_stalls);
+    RUN_TEST(test_motion_command_age_wraps_without_rearming_stale_command);
+    RUN_TEST(test_pump_owner_stops_when_serial_task_stalls);
+    RUN_TEST(test_pump_serial_lease_wraps_without_extending_deadline);
+    RUN_TEST(test_fleeting_pump_off_does_not_restart_continuous_run_cap);
     RUN_TEST(test_dtr_fall_and_cleanup_recovery);
     RUN_TEST(test_dtr_low_while_offline_does_not_request_recovery);
     RUN_TEST(test_probe_event_in_write_ordering);
@@ -689,5 +839,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pump_lease_and_hard_run_cap);
     RUN_TEST(test_pump_millis_wrap_does_not_extend_run);
     RUN_TEST(test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire);
+    RUN_TEST(test_early_open_snapshot_survives_next_idle_rx_tick);
+    RUN_TEST(test_startup_snapshot_does_not_bypass_probe_or_disconnect);
+    RUN_TEST(test_close_during_startup_snapshot_wins_over_stale_open);
+    RUN_TEST(test_open_during_startup_snapshot_wins_over_stale_closed);
+    RUN_TEST(test_close_after_startup_snapshot_still_invalidates_session);
+    RUN_TEST(test_startup_snapshot_of_closed_usb_preserves_discard_epoch);
+    RUN_TEST(test_forced_detach_cannot_be_undone_by_startup_snapshot);
     return UNITY_END();
 }

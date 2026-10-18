@@ -1,4 +1,5 @@
 #include "DataStructs.h"
+#include "CommandFreshness.h"
 #include "EncoderDriver.h"
 #include "IMUDriver.h"
 #include "Kinematics.h"
@@ -82,13 +83,23 @@ void Task_Motion(void *pvParam) {
     // 2. DOC LENH DIEU KHIEN (Mutex protected)
     //    Slave chi nhan (vx, wz) tu micro-ROS /cmd_vel hoac Web
     // ========================================================
-    float cmd_vx, cmd_wz;
-    xSemaphoreTake(ctx->cmdMutex, portMAX_DELAY);
-    cmd_vx = ctx->cmdVel.target_vx;
-    cmd_wz = ctx->cmdVel.target_wz;
-    xSemaphoreGive(ctx->cmdMutex);
+    float cmd_vx = 0.0f, cmd_wz = 0.0f;
+    uint32_t last_cmd_ms = 0;
+    bool has_valid_cmd = false;
+    // A busy command mutex must not keep the previous PWM alive. Never wait
+    // indefinitely on the path that decides whether the motors may move.
+    const bool cmd_snapshot_ok = xSemaphoreTake(ctx->cmdMutex, 0) == pdTRUE;
+    if (cmd_snapshot_ok) {
+      cmd_vx = ctx->cmdVel.target_vx;
+      cmd_wz = ctx->cmdVel.target_wz;
+      last_cmd_ms = ctx->lastCmdReceivedMs;
+      has_valid_cmd = ctx->hasValidCmd;
+      xSemaphoreGive(ctx->cmdMutex);
+    }
 
-    const bool motion_allowed = robotMaster.isMotionAllowed();
+    const bool motion_allowed = cmd_snapshot_ok &&
+        commandIsFresh(has_valid_cmd, last_cmd_ms, millis(), CMD_VEL_TIMEOUT_MS) &&
+        isfinite(cmd_vx) && isfinite(cmd_wz) && robotMaster.isMotionAllowed();
     const bool odom_stationary = stationary_gate.update(
         motion_allowed, cmd_vx, cmd_wz, ramp_vx, ramp_wz, delta_fl, delta_rl,
         delta_fr, delta_rr);

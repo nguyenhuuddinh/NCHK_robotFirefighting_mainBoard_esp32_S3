@@ -34,6 +34,8 @@ void TaskManager_init() {
 
     // 3. Khoi tao gia tri mac dinh
     g_ctx.cmdVel = {};
+    g_ctx.lastCmdReceivedMs = 0;
+    g_ctx.hasValidCmd = false;
     g_ctx.motionState = {};
     g_ctx.imuValid = false;
     g_ctx.imuReadFailures = 0;
@@ -51,6 +53,17 @@ void TaskManager_init() {
         TASK_MOTION_STACK, &g_ctx,
         TASK_MOTION_PRIORITY, nullptr, CORE_1
     );
+
+    // One Core-0 owner for pump/servo PWM. Higher priority than Serial so a
+    // stalled serial task cannot suspend the 750 ms lease or 5 s run cap.
+    const BaseType_t actuatorCreated = xTaskCreatePinnedToCore(
+        Task_Actuator, "Task_Actuator",
+        4096, &g_ctx, TASK_SERIALCOMM_PRIORITY + 1, nullptr, CORE_0
+    );
+    if (actuatorCreated != pdPASS) {
+        // PWM stays OFF after setup when its sole owner could not start.
+        DBG.println("[ERROR] Actuator owner task creation failed; pump stays OFF.");
+    }
 
     // Core 0: Raw Serial V2 Communication (Priority 3)
     // Thay thế Task_MicroROS trong runtime chính.

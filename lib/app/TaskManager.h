@@ -21,6 +21,8 @@ struct SharedContext {
 
     // --- Lenh dieu khien (Core0 ghi, Core1 doc) ---
     CmdVel_t cmdVel;
+    uint32_t lastCmdReceivedMs; // Updated with cmdVel under cmdMutex.
+    bool hasValidCmd;
 
     // --- Trang thai motion (Core1 ghi, Core0 doc) ---
     MotionState_t motionState;
@@ -45,6 +47,9 @@ struct SharedContext {
 
 /** Task dieu khien chuyen dong (Core 1, Priority cao nhat) */
 void Task_Motion(void* pvParam);
+
+/** Task so huu PWM bom/servo, doc lease doc lap task Serial (Core 0). */
+void Task_Actuator(void* pvParam);
 
 /** Task micro-ROS communication (Core 0, Priority 3) — legacy, giữ để compile rollback */
 void Task_MicroROS(void* pvParam);

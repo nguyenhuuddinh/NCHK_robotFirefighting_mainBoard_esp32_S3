@@ -95,6 +95,8 @@ static void handleCmd() {
     xSemaphoreTake(_webCtx->cmdMutex, portMAX_DELAY);
     _webCtx->cmdVel.target_vx = vx;
     _webCtx->cmdVel.target_wz = wz;
+    _webCtx->lastCmdReceivedMs = millis();
+    _webCtx->hasValidCmd = true;
     xSemaphoreGive(_webCtx->cmdMutex);
 
     // Thong bao cho RobotMaster: da nhan lenh (reset watchdog)

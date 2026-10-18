@@ -637,6 +637,8 @@ void MicroRosComm::cmdVelCallback(const void* msgin) {
     xSemaphoreTake(ctx->cmdMutex, portMAX_DELAY);
     ctx->cmdVel.target_vx = msg->linear.x;
     ctx->cmdVel.target_wz = msg->angular.z;
+    ctx->lastCmdReceivedMs = millis();
+    ctx->hasValidCmd = true;
     xSemaphoreGive(ctx->cmdMutex);
 
     // Reset watchdog và báo cho RobotMaster biết đã nhận lệnh

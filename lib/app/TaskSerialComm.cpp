@@ -14,7 +14,7 @@
  * RX (Pi -> ESP32):
  *   CMD:  cập nhật cmdVel + notify watchdog (duplicate bị bỏ qua)
  *   FIRE: legacy servo-pan queue; GPIO38 not actuated in this phase
- *   PUMP: GPIO47 pump PWM through a bounded, host/robot-watchdog gate
+ *   PUMP: validated request handed to independent actuator PWM owner
  *
  * Protocol: @PAYLOAD*CCCC\n (CRC16-CCITT-FALSE)
  * Transport: Serial USB CDC native
@@ -23,16 +23,12 @@
  */
 
 #include "TaskManager.h"
+#include "ActuatorControl.h"
 #include "SerialComm.h"
+#include "UsbLineState.h"
 #include "RobotConfig.h"
 #include "RobotMaster.h"
-#include "PumpOutput.h"
-#include "PumpSafety.h"
 #include "ServoConfig.h"
-#if SERVO_SWEEP_ENABLED
-#include "ServoOutput.h"
-#include "ServoSweep.h"
-#endif
 #include <Arduino.h>
 #include <math.h>
 #include <soc/usb_wrap_struct.h>
@@ -51,25 +47,35 @@ static SerialCommTelemetry g_telemetry;
 // [F2-L13-1] TinyUSB CDC Event Callbacks
 static volatile uint32_t s_usb_event_cnt = 0;
 static volatile uint32_t s_usb_tx_event_cnt = 0;
-static volatile bool s_dtr_active = false;
-static volatile uint32_t s_disconnect_epoch = 0;
+static portMUX_TYPE s_usb_line_mux = portMUX_INITIALIZER_UNLOCKED;
+static UsbLineState s_usb_line;
+
+static UsbLineState usbLineSnapshot() {
+    portENTER_CRITICAL(&s_usb_line_mux);
+    const UsbLineState snapshot = s_usb_line;
+    portEXIT_CRITICAL(&s_usb_line_mux);
+    return snapshot;
+}
+
+static void invalidateUsbLine() {
+    portENTER_CRITICAL(&s_usb_line_mux);
+    s_usb_line.onDisconnect();
+    portEXIT_CRITICAL(&s_usb_line_mux);
+}
 
 static void usb_event_cb(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == ARDUINO_USB_CDC_EVENTS) {
         s_usb_event_cnt++;
         if (event_id == ARDUINO_USB_CDC_LINE_STATE_EVENT) {
             arduino_usb_cdc_event_data_t* data = (arduino_usb_cdc_event_data_t*)event_data;
-            bool new_dtr = data->line_state.dtr;
             // [F2-L15-2] DTR falling edge -> session close
-            if (s_dtr_active && !new_dtr) {
-                s_disconnect_epoch++;
-            }
-            s_dtr_active = new_dtr;
+            portENTER_CRITICAL(&s_usb_line_mux);
+            s_usb_line.onLineState(data->line_state.dtr);
+            portEXIT_CRITICAL(&s_usb_line_mux);
         } else if (event_id == ARDUINO_USB_CDC_TX_EVENT) {
             s_usb_tx_event_cnt++;
         } else if (event_id == ARDUINO_USB_CDC_DISCONNECTED_EVENT) {
-            s_dtr_active = false;
-            s_disconnect_epoch++; // [F2-L14-5]
+            invalidateUsbLine(); // [F2-L14-5]
         }
     }
 }
@@ -84,15 +90,6 @@ static uint32_t g_txSeq = 0;
 static uint8_t s_servo_pan = 90;
 static uint8_t s_pump_on   = 0;
 static uint8_t s_buzzer_on = 0;
-static PumpSafety s_pump_safety;
-#if SERVO_SWEEP_ENABLED
-static ServoSweep s_servo_sweep(SERVO_SWEEP_START_DEG, SERVO_SWEEP_TURN_DEG,
-                                SERVO_SWEEP_END_DEG, SERVO_SWEEP_STEP_PERIOD_MS);
-static bool s_servo_fault = false;
-static uint32_t s_home_completion_count = 0;
-// Updated only from validated CMD frames on this same Core-0 task.
-static bool s_drive_command_zero = false;
-#endif
 
 // TX buffer tĩnh — không malloc
 static char g_payloadBuf[SERIAL_BUFFER_SIZE];
@@ -117,14 +114,12 @@ static void handleRxFrame(const SerialRxResult& rx, SharedContext* ctx) {
     switch (rx.type) {
 
     case RX_CMD: {
-#if SERVO_SWEEP_ENABLED
-        s_drive_command_zero = isfinite(rx.f1) && isfinite(rx.f2) &&
-                               fabsf(rx.f1) < 0.001f && fabsf(rx.f2) < 0.001f;
-#endif
         // CMD: cập nhật cmdVel dưới cmdMutex và notify watchdog
         xSemaphoreTake(ctx->cmdMutex, portMAX_DELAY);
         ctx->cmdVel.target_vx = rx.f1;
         ctx->cmdVel.target_wz = rx.f2;
+        ctx->lastCmdReceivedMs = millis();
+        ctx->hasValidCmd = true;
         xSemaphoreGive(ctx->cmdMutex);
 
         // Reset watchdog — CHỈ CMD hợp lệ không duplicate mới reset
@@ -151,9 +146,10 @@ static void handleRxFrame(const SerialRxResult& rx, SharedContext* ctx) {
     }
 
     case RX_PUMP: {
-        // Direct ESP32-S3 pump owner. The old WROOM queue is not a live output.
+        // The actuator task is the sole pump/servo PWM owner. This Core-0
+        // serial task only hands off a validated, non-duplicate request.
         s_pump_on = rx.pump;
-        s_pump_safety.request(s_pump_on != 0, millis());
+        actuatorSubmitPump(s_pump_on != 0, millis());
         DBG.printf("[ACT] Pump %s\n", s_pump_on ? "ON" : "OFF");
 
         // xQueueOverwrite: đảm bảo pump OFF không bao giờ bị drop
@@ -174,6 +170,14 @@ static void handleRxFrame(const SerialRxResult& rx, SharedContext* ctx) {
 // ============================================================
 void Task_SerialComm(void* pvParam) {
     SharedContext* ctx = static_cast<SharedContext*>(pvParam);
+
+    // Subscribe before the settling delay. The startup snapshot below also
+    // covers a host that opened CDC earlier, during setup().
+    static bool s_event_registered = false;
+    if (!s_event_registered) {
+        Serial.onEvent(usb_event_cb);
+        s_event_registered = true;
+    }
 
     // Chờ hệ thống ổn định
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -201,14 +205,13 @@ void Task_SerialComm(void* pvParam) {
     // Offset ACT away from the 100 ms STATE slots. Lower priority than IR.
     uint8_t actDivider = 18;
 
-    // ========================================================
-    // [F2-L13-1] Đăng ký TinyUSB CDC event callback 1 lần
-    // ========================================================
-    static bool s_event_registered = false;
-    if (!s_event_registered) {
-        Serial.onEvent(usb_event_cb);
-        s_event_registered = true;
-    }
+    // Read TinyUSB outside the critical section. If a line-state callback
+    // races with this read, its newer state/epoch wins over the snapshot.
+    const uint32_t line_revision = usbLineSnapshot().revision();
+    const bool connected_at_start = tud_cdc_n_connected(0);
+    portENTER_CRITICAL(&s_usb_line_mux);
+    s_usb_line.seedIfUnchanged(line_revision, connected_at_start);
+    portEXIT_CRITICAL(&s_usb_line_mux);
 
     for (;;) {
         vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(TASK_SERIALCOMM_PERIOD_MS));
@@ -247,7 +250,7 @@ void Task_SerialComm(void* pvParam) {
 
         // [F2-L17-1] Helper cleanup idempotent
         auto cleanup_session = [&]() {
-            s_last_disconnect_epoch = s_disconnect_epoch;
+            s_last_disconnect_epoch = usbLineSnapshot().disconnectEpoch();
             fast_disconnect = true;
             g_parser.reset();
             sm.reset();
@@ -261,7 +264,7 @@ void Task_SerialComm(void* pvParam) {
         };
 
         // (a) Checkpoint trước read
-        if (s_disconnect_epoch != s_last_disconnect_epoch) {
+        if (usbLineSnapshot().disconnectEpoch() != s_last_disconnect_epoch) {
             cleanup_disconnected_session();
         }
 
@@ -273,7 +276,7 @@ void Task_SerialComm(void* pvParam) {
         bool valid_rx_activity = false;
 
         while (Serial.available() > 0 && rxBudget > 0) {
-            if (s_disconnect_epoch != s_last_disconnect_epoch) {
+            if (usbLineSnapshot().disconnectEpoch() != s_last_disconnect_epoch) {
                 cleanup_disconnected_session();
             }
 
@@ -284,7 +287,7 @@ void Task_SerialComm(void* pvParam) {
             rxBudget--;
 
             // (b) Checkpoint ngay sau Serial.read và trước g_parser.feed
-            if (s_disconnect_epoch != s_last_disconnect_epoch) {
+            if (usbLineSnapshot().disconnectEpoch() != s_last_disconnect_epoch) {
                 cleanup_disconnected_session();
             }
 
@@ -296,7 +299,7 @@ void Task_SerialComm(void* pvParam) {
             SerialRxResult rx;
             if (g_parser.feed((uint8_t)b, rx, g_telemetry)) {
                 // (c) Checkpoint sau feed nhưng trước handleRxFrame
-                if (s_disconnect_epoch != s_last_disconnect_epoch) {
+                if (usbLineSnapshot().disconnectEpoch() != s_last_disconnect_epoch) {
                     cleanup_disconnected_session();
                     continue;
                 }
@@ -311,7 +314,7 @@ void Task_SerialComm(void* pvParam) {
         }
 
         // (d) Checkpoint sau RX loop trước clear-discard/hostNow/TX
-        if (s_disconnect_epoch != s_last_disconnect_epoch) {
+        if (usbLineSnapshot().disconnectEpoch() != s_last_disconnect_epoch) {
             cleanup_disconnected_session();
         }
 
@@ -321,9 +324,7 @@ void Task_SerialComm(void* pvParam) {
             g_parser.reset();
         }
 
-        // RX_PUMP timestamps its lease with millis() inside handleRxFrame.
-        // Sample again after RX so PumpSafety::tick never sees a time earlier
-        // than the latest request and falsely latches LEASE_EXPIRED.
+        // Sample after RX so the actuator owner receives a current host tick.
         uint32_t now = millis();
         const uint32_t txEvent = s_usb_tx_event_cnt;
         if (txEvent != observedTxEvent) {
@@ -340,7 +341,7 @@ void Task_SerialComm(void* pvParam) {
             fast_disconnect = false;
         } else {
             sm.update(
-                s_dtr_active, txEvent, valid_rx_activity);
+                usbLineSnapshot().dtr(), txEvent, valid_rx_activity);
         }
 
         // DTR drop chỉ đóng session logic. Chỉ TX stall khi host còn active
@@ -389,8 +390,7 @@ void Task_SerialComm(void* pvParam) {
                 // CDC event loop runs before the next task iteration. Invalidate
                 // the cached line state synchronously so stale DTR cannot arm
                 // probes against the detached endpoint.
-                s_dtr_active = false;
-                s_disconnect_epoch++;
+                invalidateUsbLine();
                 if (!tud_disconnect()) {
                     DBG.println("[SERIAL] USB CDC disconnect request failed");
                 }
@@ -404,66 +404,9 @@ void Task_SerialComm(void* pvParam) {
 
         bool hostNow = (sm.state == SessionState::ONLINE);
 
-        // Hard lease + continuous-run cap are independent of the ROS client.
-        // Even if the Pi repeats stale PUMP=1, the pump cannot run indefinitely.
-        // The motor command watchdog is an actuator interlock as well: a
-        // disconnected or EMERGENCY/IDLE robot cannot keep spraying.
-        const bool actuator_link_ok = hostNow && robotMaster.isMotionAllowed();
-        const bool pump_request_allowed = s_pump_safety.tick(now, actuator_link_ok);
-#if SERVO_SWEEP_ENABLED
-        const bool safe_to_home = actuator_link_ok && s_drive_command_zero;
-        if (s_servo_sweep.returningHome() && !safe_to_home) {
-            s_servo_sweep.abort();
-            servoOutput.stop();
-            DBG.println("[ERROR][SERVO] Home interrupted; pump locked until reboot.");
-        }
-        // Return only after the full sweep, intentional OFF or the bounded
-        // run cap. Lease expiry and link/watchdog loss remain fail-closed.
-        if (s_servo_sweep.active() && !pump_request_allowed) {
-            const bool normal_stop = !s_pump_on ||
-                s_pump_safety.stopReason() == PumpSafety::StopReason::MAX_RUN;
-            if (normal_stop && safe_to_home && s_servo_sweep.beginReturn(now)) {
-                DBG.println("[SERVO] Pump OFF; returning nozzle to 90 deg.");
-            } else {
-                s_servo_sweep.abort();
-                servoOutput.stop();
-                DBG.println("[ERROR][SERVO] Sweep interrupted; pump locked until reboot.");
-            }
-        }
-        // Re-arm requires physical settling at 90 and an observed PUMP=0.
-        // A held PUMP=1 cannot trigger another cycle after the 5 s cap.
-        if (s_servo_sweep.returningHome() && !s_pump_on && safe_to_home &&
-            s_servo_sweep.rearm(now)) {
-            s_home_completion_count++;
-            DBG.println("[SERVO] Nozzle at 90 deg; new OFF->ON cycle allowed.");
-        }
-        const bool pump_allowed = pump_request_allowed &&
-                                  !s_servo_sweep.consumed() && !s_servo_fault;
-#else
-        const bool pump_allowed = pump_request_allowed;
-#endif
-        pumpOutput.setEnabled(pump_allowed);
-#if SERVO_SWEEP_ENABLED
-        // Use gated pump state; while returning, update() keeps the servo
-        // energized at 90 for a short settle despite the pump being OFF.
-        const int nozzle_angle = s_servo_sweep.update(
-            pump_allowed && pumpOutput.ready(), now);
-        if (nozzle_angle < 0) {
-            if (servoOutput.active()) servoOutput.stop();
-            if (pump_allowed) {
-                s_servo_fault = true;
-                s_servo_sweep.abort();
-                pumpOutput.setEnabled(false);
-                DBG.println("[ERROR][SERVO] Sweep unavailable; pump OFF until reboot.");
-            }
-        } else if (!servoOutput.writeAngle(nozzle_angle)) {
-            s_servo_fault = true;
-            s_servo_sweep.abort();
-            pumpOutput.setEnabled(false);
-            servoOutput.stop();
-            DBG.println("[ERROR][SERVO] PWM write failed; pump and servo OFF until reboot.");
-        }
-#endif
+        // The independent actuator task expires this host heartbeat if the
+        // serial task stalls. No PWM or PumpSafety calls remain in Serial.
+        actuatorPublishLink(hostNow, now);
 
         if (hostNow && !g_lastHostConnected) {
             DBG.println("[SERIAL] USB host connected (Activity confirmed)");
@@ -471,7 +414,7 @@ void Task_SerialComm(void* pvParam) {
         g_lastHostConnected = hostNow;
 
         // ========================================================
-        // [F2-L27-1] Probe đã chốt TX-event baseline trước khi vào pump.
+        // [F2-L27-1] Probe đã chốt TX-event baseline trước khi bơm TX ring.
         // ========================================================
         sm.pump_tx(now, g_telemetry);
 
@@ -652,21 +595,14 @@ void Task_SerialComm(void* pvParam) {
             actDivider = 0;
             if (sm.state == SessionState::ONLINE && sm.tx_count == 0 &&
                 Serial.availableForWrite() >= 64) {
-                const bool servo_pwm = servoOutput.active();
-                const uint8_t phase = (s_servo_fault ||
-                    (s_servo_sweep.consumed() &&
-                     !s_servo_sweep.returningHome())) ? 3 :
-                    s_servo_sweep.returningHome() ? 2 :
-                    s_servo_sweep.active() ? 1 : 0;
-                const unsigned angle = servo_pwm && nozzle_angle >= 0 ?
-                    (unsigned)nozzle_angle : 255;
+                const ActuatorStatus act = actuatorStatusSnapshot();
                 const int plen = snprintf(g_payloadBuf, sizeof(g_payloadBuf),
                     "ACT,2,%lu,%lu,%u,%u,%u,%u,%lu,%u",
                     (unsigned long)g_txSeq, (unsigned long)now,
-                    (unsigned)pumpOutput.commandedOn(), (unsigned)phase,
-                    angle, (unsigned)servo_pwm,
-                    (unsigned long)s_home_completion_count,
-                    (unsigned)pumpOutput.ready());
+                    (unsigned)act.pumpOn, (unsigned)act.phase,
+                    (unsigned)act.angle, (unsigned)act.servoActive,
+                    (unsigned long)act.homeCompletions,
+                    (unsigned)act.pumpReady);
                 if (plen > 0 && (size_t)plen < sizeof(g_payloadBuf)) {
                     if (sm.enqueue(g_payloadBuf, 5, now + 150, g_telemetry)) {
                         g_txSeq++;
@@ -727,7 +663,7 @@ void Task_SerialComm(void* pvParam) {
 
             // Log TinyUSB CDC events [F2-L26-5]
             DBG.printf("  host: up=%d dtr=%d usb_evt=%lu tx_evt=%lu state=%d part=%lu arm=%d base=%lu\n",
-                (int)g_lastHostConnected, (int)s_dtr_active, s_usb_event_cnt, s_usb_tx_event_cnt,
+                (int)g_lastHostConnected, (int)usbLineSnapshot().dtr(), s_usb_event_cnt, s_usb_tx_event_cnt,
                 (int)sm.state, sm.consecutive_partials, (int)sm.probe_armed, sm.probe_armed_tx_event_cnt);
 
             DBG.printf("  CMD: last=%lums ago=%lums\n",

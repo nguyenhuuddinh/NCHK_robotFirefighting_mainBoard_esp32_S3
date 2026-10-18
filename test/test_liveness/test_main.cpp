@@ -734,6 +734,24 @@ void test_boot_identity_is_bounded_diagnostic_frame(void) {
         1, 2, 0, "bad,field"));
 }
 
+void test_full_elf_sha_is_formatted_independently_of_sdk_short_string(void) {
+    uint8_t digest[32];
+    for (size_t i = 0; i < sizeof(digest); ++i) digest[i] = (uint8_t)i;
+    char sha[65];
+    TEST_ASSERT_TRUE(serialFormatElfSha256(
+        sha, sizeof(sha), digest, sizeof(digest)));
+    TEST_ASSERT_EQUAL_STRING(
+        "000102030405060708090a0b0c0d0e0f"
+        "101112131415161718191a1b1c1d1e1f", sha);
+    TEST_ASSERT_FALSE(serialFormatElfSha256(
+        sha, 64, digest, sizeof(digest)));
+    TEST_ASSERT_FALSE(serialFormatElfSha256(
+        sha, sizeof(sha), digest, 16));
+    memset(digest, 0, sizeof(digest));
+    TEST_ASSERT_FALSE(serialFormatElfSha256(
+        sha, sizeof(sha), digest, sizeof(digest)));
+}
+
 void test_early_open_snapshot_survives_next_idle_rx_tick(void) {
     UsbLineState line;
     // The host opened before callback registration, so no event reached us.
@@ -862,6 +880,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pump_millis_wrap_does_not_extend_run);
     RUN_TEST(test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire);
     RUN_TEST(test_boot_identity_is_bounded_diagnostic_frame);
+    RUN_TEST(test_full_elf_sha_is_formatted_independently_of_sdk_short_string);
     RUN_TEST(test_early_open_snapshot_survives_next_idle_rx_tick);
     RUN_TEST(test_startup_snapshot_does_not_bypass_probe_or_disconnect);
     RUN_TEST(test_close_during_startup_snapshot_wins_over_stale_open);

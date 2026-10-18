@@ -282,6 +282,8 @@ size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
 
 // One-shot diagnostic frame. `elf_sha256` is 64 hex chars or "unknown".
 // It never carries command or safety admission state.
+bool serialFormatElfSha256(char* out, size_t size, const uint8_t* digest,
+                          size_t digest_size);
 size_t serialBootIdentityPayload(char* out, size_t size, uint32_t seq,
                                  uint32_t now, uint32_t reset_reason,
                                  const char* elf_sha256);

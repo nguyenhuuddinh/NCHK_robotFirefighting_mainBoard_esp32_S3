@@ -527,6 +527,22 @@ size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
     return (size_t)length;
 }
 
+bool serialFormatElfSha256(char* out, size_t size, const uint8_t* digest,
+                          size_t digest_size) {
+    if (out == nullptr || digest == nullptr || size < 65 || digest_size != 32) {
+        return false;
+    }
+    static const char hex[] = "0123456789abcdef";
+    bool has_nonzero_byte = false;
+    for (size_t i = 0; i < 32; ++i) {
+        has_nonzero_byte |= digest[i] != 0;
+        out[2 * i] = hex[digest[i] >> 4];
+        out[2 * i + 1] = hex[digest[i] & 0x0f];
+    }
+    out[64] = '\0';
+    return has_nonzero_byte;
+}
+
 size_t serialBootIdentityPayload(char* out, size_t size, uint32_t seq,
                                  uint32_t now, uint32_t reset_reason,
                                  const char* elf_sha256) {

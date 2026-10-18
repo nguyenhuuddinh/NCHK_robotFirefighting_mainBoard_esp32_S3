@@ -194,8 +194,16 @@ void Task_SerialComm(void* pvParam) {
     // reset reason and ELF SHA unchanged; an MCU reboot starts a new sample.
     const uint32_t bootResetReason = (uint32_t)esp_reset_reason();
     char bootElfSha[65] = {0};
+    // The SDK may expose only CONFIG_APP_RETRIEVE_LEN_ELF_SHA hex chars
+    // through esp_ota_get_app_elf_sha256(). The app descriptor retains the
+    // complete 32-byte digest required by the BOOT wire contract.
+    const esp_app_desc_t* appDescription = esp_ota_get_app_description();
     const char* bootIdentity =
-        (esp_ota_get_app_elf_sha256(bootElfSha, sizeof(bootElfSha)) == 65)
+        (appDescription != nullptr &&
+         appDescription->magic_word == ESP_APP_DESC_MAGIC_WORD &&
+         serialFormatElfSha256(bootElfSha, sizeof(bootElfSha),
+                               appDescription->app_elf_sha256,
+                               sizeof(appDescription->app_elf_sha256)))
             ? bootElfSha : "unknown";
     bool bootIdentityPending = false;
 

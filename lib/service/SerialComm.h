@@ -273,6 +273,13 @@ struct UsbRecoveryDiagnostics {
     uint32_t task_gap_ms = 0;
     uint32_t tx_event_age_ms = 0;
     bool tx_event_seen = false;
+    // One snapshot at the TX-stall decision, before CDC detach/cleanup.
+    // Raw FIFO space is diagnostic only; it must not change the recovery FSM.
+    bool fault_snapshot_valid = false;
+    bool fault_cdc_connected = false;
+    uint8_t fault_cdc_line_state = 0;
+    uint32_t fault_raw_write_available = 0;
+    bool fault_cached_dtr = false;
 };
 
 size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,

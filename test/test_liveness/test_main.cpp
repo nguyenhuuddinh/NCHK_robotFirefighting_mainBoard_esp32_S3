@@ -694,6 +694,11 @@ void test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire(void) {
     d.task_gap_ms = UINT32_MAX;
     d.tx_event_age_ms = UINT32_MAX;
     d.tx_event_seen = true;
+    d.fault_snapshot_valid = true;
+    d.fault_cdc_connected = true;
+    d.fault_cdc_line_state = 3;
+    d.fault_raw_write_available = UINT32_MAX;
+    d.fault_cached_dtr = true;
     telemetry.tx_deadline_expired = UINT32_MAX;
     telemetry.tx_deadline_blocked = UINT32_MAX;
     telemetry.tx_short_write = UINT32_MAX;
@@ -704,12 +709,20 @@ void test_usb_recovery_snapshot_survives_session_cleanup_and_fits_wire(void) {
         UINT32_MAX, UINT32_MAX, d, telemetry) > 0);
     const char* expected =
         "USB,2,4294967295,4294967295,4294967295,4294967295,1,64,192,0,"
-        "4294967295,4294967295,4294967295,1,4294967295,4294967295,4294967295";
+        "4294967295,4294967295,4294967295,1,4294967295,4294967295,4294967295,"
+        "1,1,3,4294967295,1";
     TEST_ASSERT_EQUAL_STRING(expected, payload);
     const size_t bytes = serialEncodeFrame(wire, sizeof(wire), payload);
     TEST_ASSERT_TRUE(bytes > 0 && bytes <= SERIAL_MAX_FRAME_SIZE);
     TEST_ASSERT_EQUAL(0, serialUsbDiagnosticsPayload(payload, 8,
         0, 0, d, telemetry));
+    d.fault_snapshot_valid = false;
+    TEST_ASSERT_TRUE(serialUsbDiagnosticsPayload(payload, sizeof(payload),
+        1, 2, d, telemetry) > 0);
+    TEST_ASSERT_EQUAL_STRING(
+        "USB,2,1,2,4294967295,4294967295,1,64,192,0,"
+        "4294967295,4294967295,4294967295,1,4294967295,4294967295,4294967295",
+        payload);
 }
 
 void test_boot_identity_is_bounded_diagnostic_frame(void) {

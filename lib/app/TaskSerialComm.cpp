@@ -369,6 +369,18 @@ void Task_SerialComm(void* pvParam) {
         if (sm.recovery_pending) {
             const SessionRecoveryReason recoveryReason = sm.recovery_reason;
             const TxAbortEvidence recoveryEvidence = sm.last_abort;
+            // Read-only snapshot before cleanup invalidates DTR and before
+            // detach clears TinyUSB's TX FIFO. These application APIs take no
+            // TX lock; the values are a momentary classification, not proof
+            // that a USB IN transfer reached the Pi.
+            const bool txStalled =
+                recoveryReason == SessionRecoveryReason::TX_STALLED;
+            const bool cdcConnected = txStalled && tud_cdc_n_connected(0);
+            const uint8_t cdcLineState = txStalled
+                ? tud_cdc_n_get_line_state(0) : 0;
+            const uint32_t rawWriteAvailable = cdcConnected
+                ? tud_cdc_n_write_available(0) : 0;
+            const bool cachedDtr = txStalled && usbLineSnapshot().dtr();
             if (recoveryReason == SessionRecoveryReason::HOST_DISCONNECTED) {
                 if (g_lastHostConnected) {
                     DBG.println("[SERIAL] USB host disconnected -> Offline");
@@ -403,6 +415,11 @@ void Task_SerialComm(void* pvParam) {
                 usbDiagnostics.task_gap_ms = taskGapMs;
                 usbDiagnostics.tx_event_age_ms = now - lastTxObservedMs;
                 usbDiagnostics.tx_event_seen = txEventSeen;
+                usbDiagnostics.fault_snapshot_valid = true;
+                usbDiagnostics.fault_cdc_connected = cdcConnected;
+                usbDiagnostics.fault_cdc_line_state = cdcLineState;
+                usbDiagnostics.fault_raw_write_available = rawWriteAvailable;
+                usbDiagnostics.fault_cached_dtr = cachedDtr;
                 DBG.println("[SERIAL] USB CDC stalled -> soft reconnect");
                 tud_cdc_n_write_clear(0);
                 tud_cdc_n_read_flush(0);

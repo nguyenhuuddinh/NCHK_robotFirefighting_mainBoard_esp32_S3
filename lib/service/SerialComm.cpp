@@ -509,7 +509,7 @@ size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
                                   uint32_t now,
                                   const UsbRecoveryDiagnostics& d,
                                   const SerialCommTelemetry& t) {
-    const int length = snprintf(out, size,
+    int length = snprintf(out, size,
         "USB,2,%lu,%lu,%lu,%lu,%u,%u,%u,%u,%lu,%lu,%lu,%u,%lu,%lu,%lu",
         (unsigned long)seq, (unsigned long)now,
         (unsigned long)d.recoveries, (unsigned long)d.recovery_ms,
@@ -521,6 +521,17 @@ size_t serialUsbDiagnosticsPayload(char* out, size_t size, uint32_t seq,
         (unsigned long)t.tx_deadline_expired,
         (unsigned long)t.tx_deadline_blocked,
         (unsigned long)t.tx_short_write);
+    if (length <= 0 || (size_t)length >= size) return 0;
+    if (d.fault_snapshot_valid) {
+        const int extra = snprintf(out + length, size - (size_t)length,
+            ",1,%u,%u,%lu,%u",
+            (unsigned)d.fault_cdc_connected,
+            (unsigned)d.fault_cdc_line_state,
+            (unsigned long)d.fault_raw_write_available,
+            (unsigned)d.fault_cached_dtr);
+        if (extra <= 0 || (size_t)extra >= size - (size_t)length) return 0;
+        length += extra;
+    }
     // Include the @, *, four CRC digits and LF in the wire size bound.
     if (length <= 0 || (size_t)length >= size ||
         (size_t)length + 7 > SERIAL_MAX_FRAME_SIZE) return 0;
